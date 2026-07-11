@@ -1,0 +1,525 @@
+"use client";
+
+import { useEffect, useState, type ReactNode } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import {
+  X,
+  Loader2,
+  ExternalLink,
+  Download,
+  Apple,
+  Terminal,
+  Puzzle,
+  ChevronDown,
+  ChevronUp,
+} from "lucide-react";
+import { useAppStore } from "@/stores/app-store";
+import { api, type McpConfigResponse } from "@/lib/api";
+import { toast } from "@/stores/toast-store";
+
+/**
+ * "Connect your AI" — install buttons only. Deliberately does NOT render the
+ * raw config JSON anywhere; the user's API key lives inside opaque deeplinks
+ * and inside files served by the install endpoints, never as readable text on
+ * screen.
+ */
+export function McpInstallDialog() {
+  const open = useAppStore((s) => s.mcpOpen);
+  const setOpen = useAppStore((s) => s.setMcpOpen);
+  const [cfg, setCfg] = useState<McpConfigResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  // Nuts is macOS-only. We disable the download row + show a "macOS only"
+  // hint on other platforms; the .dmg has nothing useful to do elsewhere.
+  // Detected client-side because the component is a Client Component, so the
+  // server render returns the disabled state safely.
+  const [isMac, setIsMac] = useState(false);
+  // Which install button the user most recently clicked. We use this to show
+  // a step-by-step "what to do next" panel below the buttons - tuned to the
+  // user's OS - so the download isn't a dead end. When Nuts (the local
+  // companion) is installed and running, it should eventually take over and
+  // surface these steps as a native notification instead. Until then this
+  // inline panel is what guides the user.
+  const [lastClicked, setLastClicked] =
+    useState<null | "claude" | "windsurf" | "nuts-mac" | "nuts-windows">(null);
+
+  useEffect(() => {
+    if (typeof navigator === "undefined") return;
+    const platform = (navigator as Navigator & { userAgentData?: { platform?: string } })
+      .userAgentData?.platform || navigator.platform || "";
+    setIsMac(/Mac|iPhone|iPad|iPod/i.test(platform));
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    setCfg(null);
+    setShowAdvanced(false);
+    setLastClicked(null);
+    setLoading(true);
+    api
+      .mcpConfig("generic")
+      .then(setCfg)
+      .catch((e) => toast.error("Couldn’t generate install bundle", (e as Error).message))
+      .finally(() => setLoading(false));
+  }, [open]);
+
+  // Two-stage download:
+  //   1. Preflight via api.auth.me() - a small existing endpoint hit with
+  //      the Bearer header from localStorage. Two birds in one call: we
+  //      verify the user is signed in AND the server sets the gml_session
+  //      cookie if it's missing (self-healing for sessions that predate
+  //      cookie auth). The cookie is what step 2 actually uses.
+  //      (Previous attempt was HEAD on the install URL, but install routes
+  //      are @router.get-only so authenticated HEAD got 405.)
+  //   2. Direct navigation via a transient anchor. The browser shows its
+  //      native download UI (progress, speed, ETA) immediately - the old
+  //      blob-fetch approach buffered the entire response into RAM with
+  //      no feedback, which felt frozen on 100+ MB binaries.
+  // The server's Content-Disposition: attachment header keeps the page
+  // from being replaced; the cookie from step 1 carries auth into the
+  // <a> navigation (which can't attach Authorization headers).
+  const downloadFile = async (url: string, filename: string, label: string) => {
+    void filename;
+    try {
+      await api.auth.me();
+    } catch (e) {
+      const status = (e as { status?: number })?.status;
+      if (status === 401) {
+        toast.error("Please sign in", "Your session expired — taking you to sign-in.");
+        const returnTo = encodeURIComponent(window.location.pathname + window.location.search);
+        setTimeout(() => { window.location.href = `/login?returnTo=${returnTo}`; }, 600);
+        return;
+      }
+      toast.error(`${label} failed`, (e as Error).message);
+      return;
+    }
+    const a = document.createElement("a");
+    a.href = url;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    toast.success(`${label} downloading`, "Check your Downloads folder.");
+  };
+
+  // (Chrome-extension binding removed: Nuts replaces the extension as
+  // the cross-app sign-in vector. The .zip we serve carries a per-user
+  // akhort-config.json that Nuts reads silently on first launch.)
+
+  return (
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          className="fixed inset-0 z-[55] flex items-center justify-center p-4"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.15 }}
+          onClick={() => setOpen(false)}
+        >
+          <div className="absolute inset-0 bg-[rgba(5,5,7,0.7)] backdrop-blur-sm" />
+          <motion.div
+            role="dialog"
+            aria-modal="true"
+            initial={{ opacity: 0, scale: 0.97, y: 8 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.97, y: 8 }}
+            transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+            onClick={(e) => e.stopPropagation()}
+            className="relative z-10 w-full max-w-md rounded-xl border border-border-strong bg-bg-1 p-6"
+          >
+            <div className="mb-5 flex items-start justify-between">
+              <div>
+                <h2 className="font-clash text-lg font-semibold tracking-tight text-text-0">Connect your AI</h2>
+                <p className="mt-1 text-sm text-text-1">
+                  One click per tool. Nothing to copy.
+                </p>
+              </div>
+              <button
+                onClick={() => setOpen(false)}
+                className="flex h-7 w-7 items-center justify-center rounded-sm text-text-2 hover:bg-bg-3 hover:text-text-0"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {loading || !cfg ? (
+              <div className="flex h-44 items-center justify-center text-text-2">
+                <Loader2 className="h-5 w-5 animate-spin" />
+              </div>
+            ) : (
+              <div className="space-y-2.5">
+                {/* Cursor — native deeplink, one click installs the MCP. */}
+                <a
+                  href={cfg.cursor_deeplink}
+                  className="flex w-full items-center justify-between gap-2 rounded-md bg-accent px-4 py-2.5 text-sm font-medium text-bg-0 transition-opacity hover:opacity-90"
+                >
+                  <span className="flex items-center gap-2">
+                    <ExternalLink className="h-4 w-4" /> Install for Cursor
+                  </span>
+                  <span className="text-xs opacity-70">opens Cursor</span>
+                </a>
+
+                {/* VS Code — deeplink (Copilot Chat MCP). */}
+                <a
+                  href={cfg.vscode_deeplink}
+                  className="flex w-full items-center justify-between gap-2 rounded-md border border-border-strong bg-bg-2 px-4 py-2.5 text-sm font-medium text-text-0 transition-colors hover:bg-bg-3"
+                >
+                  <span className="flex items-center gap-2">
+                    <ExternalLink className="h-4 w-4" /> Install for VS Code
+                  </span>
+                  <span className="text-xs text-text-2">opens VS Code</span>
+                </a>
+
+                {/* Claude Desktop — downloads a per-user .mcpb with the bearer
+                    pre-baked into the manifest. Double-click installs without
+                    prompting for a token. */}
+                <button
+                  onClick={() => {
+                    downloadFile(
+                      cfg.install_url_claude_desktop,
+                      "akhrot-memory.mcpb",
+                      "Claude Desktop extension",
+                    );
+                    setLastClicked("claude");
+                  }}
+                  className="flex w-full items-center justify-between gap-2 rounded-md border border-border-strong bg-bg-2 px-4 py-2.5 text-sm font-medium text-text-0 transition-colors hover:bg-bg-3"
+                >
+                  <span className="flex items-center gap-2">
+                    <Download className="h-4 w-4" /> Install for Claude Desktop
+                  </span>
+                  <span className="text-xs text-text-2">.mcpb — 1-click install</span>
+                </button>
+
+                {/* Windsurf — same per-user .mcpb. Windsurf's DXT/MCPB support
+                    installs the extension and authenticates in one step. */}
+                <button
+                  onClick={() => {
+                    downloadFile(
+                      cfg.install_url_windsurf,
+                      "akhrot-memory.mcpb",
+                      "Windsurf extension",
+                    );
+                    setLastClicked("windsurf");
+                  }}
+                  className="flex w-full items-center justify-between gap-2 rounded-md border border-border-strong bg-bg-2 px-4 py-2.5 text-sm font-medium text-text-0 transition-colors hover:bg-bg-3"
+                >
+                  <span className="flex items-center gap-2">
+                    <Download className="h-4 w-4" /> Install for Windsurf
+                  </span>
+                  <span className="text-xs text-text-2">.mcpb — 1-click install</span>
+                </button>
+
+                {/* OpenAI Codex — stdio bridge. One-click installers wire up
+                    ~/.codex/config.toml (token baked in); the plugin bundle is
+                    the same bridge for Codex's /plugins. Needs Node 18+. */}
+                <div className="mt-4 rounded-md border border-border-strong bg-bg-2 p-3">
+                  <div className="mb-2 flex items-center gap-2 text-sm font-medium text-text-0">
+                    <Terminal className="h-4 w-4" /> OpenAI Codex
+                    <span className="text-xs font-normal text-text-2">
+                      — CLI
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    <button
+                      onClick={() => {
+                        downloadFile(
+                          cfg.install_url_codex_macos,
+                          "install-akhrot-codex.command",
+                          "Codex installer (macOS/Linux)",
+                        );
+                      }}
+                      className="flex w-full items-center justify-between gap-2 rounded-sm border border-border bg-bg-1 px-3 py-2 text-xs text-text-0 transition-colors hover:bg-bg-3"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Download className="h-3.5 w-3.5" /> Installer · macOS / Linux
+                      </span>
+                      <span className="text-text-2">.command</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        downloadFile(
+                          cfg.install_url_codex_windows,
+                          "install-akhrot-codex.cmd",
+                          "Codex installer (Windows)",
+                        );
+                      }}
+                      className="flex w-full items-center justify-between gap-2 rounded-sm border border-border bg-bg-1 px-3 py-2 text-xs text-text-0 transition-colors hover:bg-bg-3"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Download className="h-3.5 w-3.5" /> Installer · Windows
+                      </span>
+                      <span className="text-text-2">.cmd</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        downloadFile(
+                          cfg.install_url_codex_plugin,
+                          "akhrot-memory-codex-plugin.zip",
+                          "Codex plugin",
+                        );
+                      }}
+                      className="flex w-full items-center justify-between gap-2 rounded-sm border border-border bg-bg-1 px-3 py-2 text-xs text-text-0 transition-colors hover:bg-bg-3"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Puzzle className="h-3.5 w-3.5" /> Plugin bundle
+                      </span>
+                      <span className="text-text-2">.zip</span>
+                    </button>
+                  </div>
+                  <p className="mt-2 text-[11px] leading-relaxed text-text-2">
+                    Run the installer (needs <span className="font-mono">node 18+</span>),
+                    restart Codex, then say <em>“use akhrots memory to remember …”</em>.
+                  </p>
+                </div>
+
+                {/* Nuts - desktop companion. Two builds: macOS (.dmg) and
+                    Windows (.exe). Each download bundles the per-user
+                    akhort-config.json next to the binary so Nuts can sign in
+                    silently on first launch. We grey the button that doesn't
+                    match the current platform so the user knows which one to
+                    grab without thinking. GitHub source link intentionally
+                    removed - the user asked for download-only. */}
+                <div className="mt-4 rounded-md border border-border-strong bg-bg-2 p-3">
+                  <div className="mb-2 flex items-center gap-2 text-sm font-medium text-text-0">
+                    <Apple className="h-4 w-4" /> Nuts
+                    <span className="text-xs font-normal text-text-2">
+                      — desktop companion
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    <button
+                      onClick={() => {
+                        downloadFile(
+                          cfg.install_url_nuts,
+                          "Akhort-Nuts.zip",
+                          "Nuts for Mac",
+                        );
+                        setLastClicked("nuts-mac");
+                      }}
+                      disabled={!isMac}
+                      className="flex w-full items-center justify-between gap-2 rounded-sm border border-border bg-bg-1 px-3 py-2 text-xs text-text-0 transition-colors hover:bg-bg-3 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Download className="h-3.5 w-3.5" /> Download Nuts for Mac
+                      </span>
+                      <span className="text-text-2">
+                        {isMac ? ".dmg — signs you in automatically" : "macOS only"}
+                      </span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        downloadFile(
+                          cfg.install_url_nuts_windows,
+                          "Akhort-Nuts-Windows.zip",
+                          "Nuts for Windows",
+                        );
+                        setLastClicked("nuts-windows");
+                      }}
+                      disabled={isMac}
+                      className="flex w-full items-center justify-between gap-2 rounded-sm border border-border bg-bg-1 px-3 py-2 text-xs text-text-0 transition-colors hover:bg-bg-3 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Download className="h-3.5 w-3.5" /> Download Nuts for Windows
+                      </span>
+                      <span className="text-text-2">
+                        {isMac ? "Windows only" : ".exe — signs you in automatically"}
+                      </span>
+                    </button>
+                  </div>
+                  <p className="mt-2 text-[11px] leading-relaxed text-text-2">
+                    {isMac
+                      ? <>Pick the Mac build above. Open the zip, drag <em>Nuts</em> into <em>Applications</em>, launch. The bundled config carries your sign-in — nothing to paste.</>
+                      : <>Pick the Windows build above. Extract the zip and double-click <em>Nuts.exe</em>. The bundled config carries your sign-in — nothing to paste.</>}
+                  </p>
+                </div>
+
+                {/* Post-click install guidance, OS-aware. Renders only when
+                    the user has clicked one of the install buttons. Mac and
+                    Windows users see different steps because Claude/Windsurf
+                    file association + Settings paths differ. */}
+                {lastClicked && (
+                  <InstallSteps
+                    target={lastClicked}
+                    isMac={isMac}
+                    serverUrl={cfg.server_url}
+                    onClose={() => setLastClicked(null)}
+                  />
+                )}
+
+                {/* Advanced: server URL + generic config download (power users
+                    on unsupported clients who still want a JSON they can drop
+                    in by hand). The path stays one click — no token text on
+                    screen. */}
+                <button
+                  onClick={() => setShowAdvanced((s) => !s)}
+                  className="flex w-full items-center justify-between gap-2 px-1 pt-2 text-xs text-text-2 hover:text-text-0"
+                >
+                  <span>Advanced</span>
+                  {showAdvanced ? (
+                    <ChevronUp className="h-3.5 w-3.5" />
+                  ) : (
+                    <ChevronDown className="h-3.5 w-3.5" />
+                  )}
+                </button>
+                {showAdvanced && (
+                  <div className="space-y-1 px-1 pb-1 text-xs">
+                    <div>
+                      <span className="text-text-2">Server: </span>
+                      <span className="font-mono text-text-0">{cfg.server_url}</span>
+                    </div>
+                    <button
+                      onClick={() => downloadFile(
+                        cfg.install_url_generic,
+                        "akhrot-mcp-config.json",
+                        "Generic config",
+                      )}
+                      className="text-text-1 underline-offset-2 hover:underline"
+                    >
+                      Download generic MCP config (.json)
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// InstallSteps - inline OS-specific "what to do next" guidance.
+//
+// Shown after the user clicks one of the install buttons. The right steps
+// depend on:
+//   * Which IDE / app they're installing for (Claude / Windsurf / Nuts), and
+//   * Which OS they're on (Mac / Windows).
+//
+// Long term, when the Nuts desktop companion is installed and running, it
+// should pick this up and surface these steps as a native notification, then
+// drive the actual install (writing the .mcpb into Claude's extension folder,
+// adding the URL to Windsurf's mcp_config.json, etc.). Until that lands, the
+// dashboard shows them here so the user doesn't get stuck.
+// ----------------------------------------------------------------------------
+function InstallSteps({
+  target,
+  isMac,
+  serverUrl,
+  onClose,
+}: {
+  target: "claude" | "windsurf" | "nuts-mac" | "nuts-windows";
+  isMac: boolean;
+  serverUrl: string;
+  onClose: () => void;
+}) {
+  const steps = getSteps(target, isMac, serverUrl);
+  return (
+    <div className="mt-3 rounded-md border border-accent/40 bg-accent/5 p-3">
+      <div className="mb-2 flex items-start justify-between gap-2">
+        <div className="text-sm font-medium text-text-0">
+          {steps.title}
+          <span className="ml-2 text-xs font-normal text-text-2">
+            {isMac ? "macOS" : "Windows"}
+          </span>
+        </div>
+        <button
+          onClick={onClose}
+          aria-label="Close instructions"
+          className="-mr-1 -mt-1 flex h-6 w-6 items-center justify-center rounded-sm text-text-2 hover:bg-bg-3 hover:text-text-0"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
+      <ol className="ml-4 list-decimal space-y-1.5 text-xs text-text-1">
+        {steps.items.map((s, i) => (
+          <li key={i}>{s}</li>
+        ))}
+      </ol>
+      {steps.note && (
+        <p className="mt-2 text-[11px] leading-relaxed text-text-2">{steps.note}</p>
+      )}
+    </div>
+  );
+}
+
+function getSteps(
+  target: "claude" | "windsurf" | "nuts-mac" | "nuts-windows",
+  isMac: boolean,
+  serverUrl: string,
+): { title: string; items: ReactNode[]; note?: ReactNode } {
+  // Claude Desktop --------------------------------------------------------
+  if (target === "claude") {
+    if (isMac) {
+      return {
+        title: "Finish installing for Claude Desktop",
+        items: [
+          <>Open your <em>Downloads</em> folder.</>,
+          <>Double-click <span className="font-mono">akhrot-memory.mcpb</span>.</>,
+          <>Claude Desktop opens with an install confirmation. Click <em>Install</em>.</>,
+        ],
+        note: <>If macOS shows &ldquo;Open with…&rdquo;, choose <em>Claude</em> and tick &ldquo;Always use this app&rdquo;.</>,
+      };
+    }
+    return {
+      title: "Finish installing for Claude Desktop",
+      items: [
+        <>Open <em>Claude Desktop</em>.</>,
+        <>Go to <em>Settings &rarr; Extensions &rarr; Advanced settings &rarr; Install Extension…</em></>,
+        <>Pick <span className="font-mono">akhrot-memory.mcpb</span> from your <em>Downloads</em> folder.</>,
+        <>Click <em>Install</em>.</>,
+      ],
+      note: <>This works even when Windows shows &ldquo;Open with…&rdquo; on double-click — Claude installs the file from inside its own settings.</>,
+    };
+  }
+
+  // Windsurf --------------------------------------------------------------
+  // Windsurf does not natively install .mcpb files yet; we instruct the
+  // user to add the URL to their MCP servers list manually.
+  if (target === "windsurf") {
+    const open = isMac
+      ? <><kbd>⌘</kbd> + <kbd>,</kbd></>
+      : <><kbd>Ctrl</kbd> + <kbd>,</kbd></>;
+    return {
+      title: "Finish installing for Windsurf",
+      items: [
+        <>Open <em>Windsurf</em>.</>,
+        <>Press {open} to open Settings, then go to <em>Cascade &rarr; MCP Servers</em>.</>,
+        <>Click <em>Add Custom Server +</em>.</>,
+        <>Paste this URL: <span className="font-mono">{serverUrl}</span></>,
+        <>Save. Windsurf reconnects with your account.</>,
+      ],
+      note: <>Windsurf doesn&rsquo;t install <span className="font-mono">.mcpb</span> bundles natively — adding the URL gives the same result. Your API key is sent automatically by the URL.</>,
+    };
+  }
+
+  // Nuts (macOS) ----------------------------------------------------------
+  if (target === "nuts-mac") {
+    return {
+      title: "Finish installing Nuts (Mac)",
+      items: [
+        <>Open your <em>Downloads</em> folder.</>,
+        <>Open <span className="font-mono">Akhort-Nuts.zip</span> (Finder auto-extracts).</>,
+        <>Open the <span className="font-mono">.dmg</span> inside and drag <em>Nuts</em> into <em>Applications</em>.</>,
+        <>Launch <em>Nuts</em> from Applications.</>,
+      ],
+      note: <>Nuts reads the sign-in bundled with the zip, so you don&rsquo;t have to log in again.</>,
+    };
+  }
+
+  // Nuts (Windows) --------------------------------------------------------
+  // The Windows build is shipped as a PyInstaller .exe inside the zip; users
+  // double-click the exe to launch, no installer step.
+  return {
+    title: "Finish installing Nuts (Windows)",
+    items: [
+      <>Open your <em>Downloads</em> folder.</>,
+      <>Right-click <span className="font-mono">Akhort-Nuts-Windows.zip</span> &rarr; <em>Extract All…</em> &rarr; choose a folder (e.g. Desktop).</>,
+      <>Double-click <span className="font-mono">Nuts.exe</span> in the extracted folder.</>,
+      <>SmartScreen may warn on first run &mdash; click <em>More info</em> &rarr; <em>Run anyway</em>.</>,
+      <>A tray icon appears near the clock. Hold <kbd>Ctrl</kbd> + <kbd>Alt</kbd> to talk.</>,
+    ],
+    note: <>Nuts reads the sign-in bundled with the zip, so you don&rsquo;t have to log in again.</>,
+  };
+}

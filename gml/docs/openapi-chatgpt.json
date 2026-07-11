@@ -1,0 +1,201 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "GML Memory",
+    "description": "Long-term memory layer for AI assistants. Recall relevant past context before answering, and ingest new facts after.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://gml.example.com",
+      "description": "Replace with your GML deployment hostname"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "apiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key"
+      }
+    },
+    "schemas": {
+      "RecallRequest": {
+        "type": "object",
+        "required": ["query"],
+        "properties": {
+          "query": { "type": "string", "description": "The user's question, verbatim." },
+          "top_k": { "type": "integer", "minimum": 1, "maximum": 50, "default": 5 }
+        }
+      },
+      "RecallHit": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "content": { "type": "string" },
+          "entity": { "type": "string", "nullable": true },
+          "attribute": { "type": "string", "nullable": true },
+          "value": { "type": "string", "nullable": true },
+          "similarity": { "type": "number" },
+          "timestamp": { "type": "string", "format": "date-time" },
+          "source": { "type": "string" }
+        }
+      },
+      "RecallResponse": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string" },
+          "results": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/RecallHit" }
+          }
+        }
+      },
+      "IngestRequest": {
+        "type": "object",
+        "required": ["user_query", "assistant_reply"],
+        "properties": {
+          "user_query": { "type": "string", "description": "The user's message that just happened." },
+          "assistant_reply": { "type": "string", "description": "The assistant's response to that message." }
+        }
+      },
+      "IngestResponse": {
+        "type": "object",
+        "properties": {
+          "mode": { "type": "string", "enum": ["llm", "sdp"] },
+          "count": { "type": "integer" },
+          "created": { "type": "array", "items": { "type": "string" } },
+          "detail": { "type": "string", "nullable": true }
+        }
+      },
+      "MemoryListResponse": {
+        "type": "object",
+        "properties": {
+          "total": { "type": "integer" },
+          "limit": { "type": "integer" },
+          "offset": { "type": "integer" },
+          "memories": { "type": "array", "items": { "type": "object" } }
+        }
+      }
+    }
+  },
+  "security": [{ "apiKey": [] }],
+  "paths": {
+    "/api/memory/recall": {
+      "post": {
+        "operationId": "recallMemory",
+        "summary": "Recall relevant memories for a query",
+        "description": "Returns the top-K most relevant memories (raw vector retrieval, no SAM). Call this BEFORE answering the user; weave the returned memories into the response.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RecallRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Top-K relevant memories",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RecallResponse" }
+              }
+            }
+          },
+          "401": { "description": "Missing or invalid X-API-Key" }
+        }
+      }
+    },
+    "/api/memory/ingest": {
+      "post": {
+        "operationId": "ingestMemory",
+        "summary": "Persist durable facts from a turn (LLM extraction)",
+        "description": "Runs an LLM extractor on (user_query, assistant_reply) to pull out durable facts (entity/attribute/value triples). Use this AFTER you reply so the next turn has access to the new facts. Slower than sdp_ingest (~1-3 s per call) but catches nuanced facts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/IngestRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Extraction result",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/IngestResponse" }
+              }
+            }
+          },
+          "401": { "description": "Missing or invalid X-API-Key" },
+          "503": { "description": "Extractor backend unavailable" }
+        }
+      }
+    },
+    "/api/memory/sdp_ingest": {
+      "post": {
+        "operationId": "fastIngestMemory",
+        "summary": "Fast regex-based ingest (no LLM)",
+        "description": "Same input/output as /api/memory/ingest but ~100x faster — uses regex/pattern extraction, no LLM. Catches stack names, versions, URLs, named entities. Misses paraphrased or implicit facts.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/IngestRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Extraction result",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/IngestResponse" }
+              }
+            }
+          },
+          "401": { "description": "Missing or invalid X-API-Key" }
+        }
+      }
+    },
+    "/api/memories": {
+      "get": {
+        "operationId": "listMemories",
+        "summary": "List the user's stored memories",
+        "parameters": [
+          { "in": "query", "name": "limit", "schema": { "type": "integer", "minimum": 1, "maximum": 500, "default": 50 } },
+          { "in": "query", "name": "offset", "schema": { "type": "integer", "minimum": 0, "default": 0 } },
+          { "in": "query", "name": "cluster", "schema": { "type": "integer" }, "description": "Optional cluster filter" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Memory list",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MemoryListResponse" }
+              }
+            }
+          },
+          "401": { "description": "Missing or invalid X-API-Key" }
+        }
+      }
+    },
+    "/api/memories/{memory_id}": {
+      "delete": {
+        "operationId": "forgetMemory",
+        "summary": "Delete a specific memory",
+        "description": "Permanently removes a memory by id. The retriever index is rebuilt automatically.",
+        "parameters": [
+          { "in": "path", "name": "memory_id", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Deleted" },
+          "401": { "description": "Missing or invalid X-API-Key" },
+          "404": { "description": "Memory not found" }
+        }
+      }
+    }
+  }
+}

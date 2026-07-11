@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-relay"
+version = "0.1.0"
+description = "A multi-user broker/relay for MCP hosts and servers, reachable from browser extensions and native apps over Streamable HTTP."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "mcp-relay" }]
+dependencies = [
+    "starlette>=0.37",
+    "uvicorn[standard]>=0.29",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+postgres = [
+    "psycopg[binary]>=3.2",
+    "psycopg-pool>=3.2",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "psycopg[binary]>=3.2",
+    "psycopg-pool>=3.2",
+]
+
+[project.scripts]
+mcp-relay = "mcp_relay.__main__:main"
+mcp-relay-connector = "mcp_relay.connector:main"
+mcp-relay-client = "mcp_relay.client:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_relay"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

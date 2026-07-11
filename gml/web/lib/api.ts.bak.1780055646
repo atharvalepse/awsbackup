@@ -1,0 +1,233 @@
+/**
+ * Typed client for the GML `/api` surface. One thin fetch wrapper; no data
+ * fetching in components — hooks (hooks/) call these, TanStack Query caches.
+ */
+import type {
+  ClusterListResponse,
+  GraphResponse,
+  HealthResponse,
+  IngestResponse,
+  MemoryDetailResponse,
+  MemoryListResponse,
+  RecallResponse,
+  RecallStreamDone,
+  StageEvent,
+  SynthesizeResponse,
+  TraceResponse,
+} from "./types";
+import { clearToken, getToken } from "./auth";
+
+export interface McpConfigResponse {
+  client: string;
+  server_url: string;
+  api_key: string;
+  server_block: { url: string; headers: Record<string, string> };
+  config: { mcpServers: Record<string, unknown> };
+  cursor_deeplink: string | null;
+}
+
+export const API_BASE =
+  process.env.NEXT_PUBLIC_GML_API_BASE ?? "http://localhost:8000";
+
+/** Auth + content-type headers. Adds Bearer <jwt> when a token is stored. */
+function authHeaders(extra?: HeadersInit): HeadersInit {
+  const token = getToken();
+  return {
+    "content-type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...extra,
+  };
+}
+
+/** Auth token envelope returned by /auth/login and /auth/signup. */
+export interface AuthToken {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+  user_id: string;
+}
+
+export interface MeResponse {
+  user_id: string;
+  email: string | null;
+  is_master: boolean;
+}
+
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers: authHeaders(init?.headers),
+  });
+  if (res.status === 401) clearToken(); // token expired/invalid — AuthGate will redirect
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body.detail) detail = body.detail;
+    } catch {
+      /* non-JSON error body — keep statusText */
+    }
+    throw new ApiError(res.status, detail);
+  }
+  return (await res.json()) as T;
+}
+
+type SSEFrame = { event: string; data: unknown };
+
+function parseFrame(frame: string): SSEFrame | null {
+  let event = "message";
+  const data: string[] = [];
+  for (const line of frame.split("\n")) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) data.push(line.slice(5).trim());
+  }
+  if (data.length === 0) return null;
+  try {
+    return { event, data: JSON.parse(data.join("\n")) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * POST a JSON body and read a Server-Sent Events stream. `onStage` fires for
+ * every `stage` frame; resolves with the `done` frame's data. Throws on an
+ * `error` frame or a stream that ends without `done`.
+ */
+async function postSSE<T>(
+  path: string,
+  body: unknown,
+  onStage: (s: StageEvent) => void,
+  signal?: AbortSignal,
+): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (res.status === 401) clearToken();
+  if (!res.ok || !res.body) throw new ApiError(res.status, res.statusText);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let done: T | null = null;
+
+  for (;;) {
+    const { done: finished, value } = await reader.read();
+    if (finished) break;
+    buf += decoder.decode(value, { stream: true });
+    const frames = buf.split("\n\n");
+    buf = frames.pop() ?? "";
+    for (const raw of frames) {
+      const f = parseFrame(raw);
+      if (!f) continue;
+      if (f.event === "stage") onStage(f.data as StageEvent);
+      else if (f.event === "done") done = f.data as T;
+      else if (f.event === "error")
+        throw new ApiError(500, (f.data as { detail?: string })?.detail ?? "stream error");
+    }
+  }
+  if (done === null) throw new ApiError(500, "stream ended without a result");
+  return done;
+}
+
+export const api = {
+  health: () => request<HealthResponse>("/api/health"),
+
+  auth: {
+    signup: (email: string, password: string) =>
+      request<AuthToken>("/auth/signup", {
+        method: "POST",
+        body: JSON.stringify({ email, password }),
+      }),
+    login: (email: string, password: string) =>
+      request<AuthToken>("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ email, password }),
+      }),
+    me: () => request<MeResponse>("/auth/me"),
+  },
+
+  memories: (params: { cluster?: number; limit?: number; offset?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (params.cluster != null) q.set("cluster", String(params.cluster));
+    if (params.limit != null) q.set("limit", String(params.limit));
+    if (params.offset != null) q.set("offset", String(params.offset));
+    const qs = q.toString();
+    return request<MemoryListResponse>(`/api/memories${qs ? `?${qs}` : ""}`);
+  },
+
+  memory: (id: string) =>
+    request<MemoryDetailResponse>(`/api/memories/${encodeURIComponent(id)}`),
+
+  graph: (depth = 2) => request<GraphResponse>(`/api/memories/graph?depth=${depth}`),
+
+  clusters: () => request<ClusterListResponse>("/api/clusters"),
+
+  recall: (query: string, topK = 8) =>
+    request<RecallResponse>("/api/memory/recall", {
+      method: "POST",
+      body: JSON.stringify({ query, top_k: topK }),
+    }),
+
+  trace: (text: string) =>
+    request<TraceResponse>("/api/memory/trace", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
+
+  synthesize: (query: string) =>
+    request<SynthesizeResponse>(
+      `/api/memory/synthesize?query=${encodeURIComponent(query)}`,
+    ),
+
+  ingest: (userQuery: string, assistantReply: string, fast = false) =>
+    request<IngestResponse>(`/api/memory/${fast ? "sdp_ingest" : "ingest"}`, {
+      method: "POST",
+      body: JSON.stringify({ user_query: userQuery, assistant_reply: assistantReply }),
+    }),
+
+  /** Issue this user's personalized MCP config (+ Cursor one-click link). */
+  mcpConfig: (client = "generic") =>
+    request<McpConfigResponse>(
+      `/api/me/mcp-config?client=${encodeURIComponent(client)}`,
+      { method: "POST" },
+    ),
+
+  forget: (id: string) =>
+    request<{ deleted: string; remaining: number }>(
+      `/api/memories/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
+
+  /** Full-pipeline recall with live stage progress (SSE). */
+  recallStream: (
+    query: string,
+    topK: number,
+    onStage: (s: StageEvent) => void,
+    signal?: AbortSignal,
+  ) =>
+    postSSE<RecallStreamDone>(
+      "/api/memory/recall/stream",
+      { query, top_k: topK },
+      onStage,
+      signal,
+    ),
+
+  /** Streamed pipeline trace (SSE) — same payload as `trace`, stage-by-stage. */
+  traceStream: (text: string, onStage: (s: StageEvent) => void, signal?: AbortSignal) =>
+    postSSE<TraceResponse>("/api/memory/trace/stream", { text }, onStage, signal),
+};
+

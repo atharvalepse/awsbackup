@@ -1,0 +1,23 @@
+### Context (from GML memory)
+
+{% if reason_from_scratch %}
+_No prior memory available. Reason from scratch._
+{% elif selected %}
+{% for rh in selected %}
+[{{ loop.index }}] {{ rh.record.source }}{% if rh.record.entity %} ({{ rh.record.entity }}{% if rh.record.attribute %}: {{ rh.record.attribute }}{% endif %}){% endif %}
+{{ rh.record.content }}
+
+{% endfor %}
+{% else %}
+_No relevant context retrieved._
+{% endif %}
+{% if reasoning_content %}
+
+### SAM Reasoning
+{{ reasoning_content }}
+{% endif %}
+
+### Provenance
+{{ total_items }} item(s) retrieved from GML memory.
+
+### User Query

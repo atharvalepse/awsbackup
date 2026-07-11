@@ -1,0 +1,99 @@
+# =========================================================================
+#  .gitignore — akhrots.com AWS code backup
+#  Push source code + web assets. Never push ML model weights (the model is
+#  deployed on Lightning AI), secrets, dependencies, or build artifacts.
+#  Note: nested .gitignore files (gml/, gml/web/) also apply.
+# =========================================================================
+
+# ---------- Secrets / env ----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# ---------- ML model weights / artifacts (deployed on Lightning AI) ----------
+models/
+*.gguf
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.tflite
+*.pb
+*.h5
+*.hdf5
+*.msgpack
+adapter_model.*
+checkpoints/
+runs/
+wandb/
+mlruns/
+# Vector indexes / serialized stores
+*.faiss
+*.index
+*.npy
+*.npz
+*.arrow
+*.parquet
+
+# ---------- Python ----------
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+.eggs/
+
+# ---------- Tooling caches ----------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# ---------- Node / frontend ----------
+node_modules/
+.next/
+.turbo/
+.vercel/
+out/
+dist/
+build/
+*.tsbuildinfo
+
+# ---------- Local DBs ----------
+*.sqlite
+*.sqlite3
+*.db
+*.duckdb
+
+# ---------- Logs ----------
+*.log
+*.err
+logs/
+
+# ---------- IDE / editor / OS ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+*.bak
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

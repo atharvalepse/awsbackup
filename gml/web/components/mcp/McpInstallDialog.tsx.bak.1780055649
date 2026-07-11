@@ -1,0 +1,127 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import { X, Copy, Check, Loader2, ExternalLink } from "lucide-react";
+import { useAppStore } from "@/stores/app-store";
+import { api, type McpConfigResponse } from "@/lib/api";
+import { toast } from "@/stores/toast-store";
+
+/**
+ * "Connect your AI" — issues this user's personalized MCP config and offers a
+ * one-click Cursor install plus copy-paste config for the other clients. The
+ * config embeds the user's long-lived key; their AI client then reaches their
+ * own per-user memory through the relay.
+ */
+export function McpInstallDialog() {
+  const open = useAppStore((s) => s.mcpOpen);
+  const setOpen = useAppStore((s) => s.setMcpOpen);
+  const [cfg, setCfg] = useState<McpConfigResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setCfg(null);
+    setCopied(false);
+    setLoading(true);
+    api
+      .mcpConfig("generic")
+      .then(setCfg)
+      .catch((e) => toast.error("Couldn’t generate MCP config", (e as Error).message))
+      .finally(() => setLoading(false));
+  }, [open]);
+
+  const configText = cfg ? JSON.stringify(cfg.config, null, 2) : "";
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(configText);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      toast.error("Copy failed", "Select and copy manually.");
+    }
+  };
+
+  return (
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          className="fixed inset-0 z-[55] flex items-center justify-center p-4"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.15 }}
+          onClick={() => setOpen(false)}
+        >
+          <div className="absolute inset-0 bg-[rgba(5,5,7,0.7)] backdrop-blur-sm" />
+          <motion.div
+            role="dialog"
+            aria-modal="true"
+            initial={{ opacity: 0, scale: 0.97, y: 8 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.97, y: 8 }}
+            transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+            onClick={(e) => e.stopPropagation()}
+            className="relative z-10 w-full max-w-lg rounded-xl border border-border-strong bg-bg-1 p-6"
+          >
+            <div className="mb-5 flex items-start justify-between">
+              <div>
+                <h2 className="text-lg font-medium text-text-0">Connect your AI</h2>
+                <p className="mt-1 text-sm text-text-1">
+                  Give your AI tools your memory over MCP — one click for Cursor,
+                  copy-paste for the rest.
+                </p>
+              </div>
+              <button
+                onClick={() => setOpen(false)}
+                className="flex h-7 w-7 items-center justify-center rounded-sm text-text-2 hover:bg-bg-3 hover:text-text-0"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {loading || !cfg ? (
+              <div className="flex h-40 items-center justify-center text-text-2">
+                <Loader2 className="h-5 w-5 animate-spin" />
+              </div>
+            ) : (
+              <div className="space-y-5">
+                <a
+                  href={cfg.cursor_deeplink ?? "#"}
+                  className="flex w-full items-center justify-center gap-2 rounded-md bg-accent px-4 py-2.5 text-sm font-medium text-bg-0 transition-opacity hover:opacity-90"
+                >
+                  <ExternalLink className="h-4 w-4" /> Install in Cursor
+                </a>
+
+                <div>
+                  <div className="mb-1.5 flex items-center justify-between">
+                    <span className="text-xs uppercase tracking-wide text-text-2">
+                      Claude / Windsurf / others — paste into the MCP config
+                    </span>
+                    <button
+                      onClick={copy}
+                      className="flex items-center gap-1 rounded px-2 py-1 text-xs text-text-1 hover:bg-bg-3 hover:text-text-0"
+                    >
+                      {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                      {copied ? "Copied" : "Copy"}
+                    </button>
+                  </div>
+                  <pre className="max-h-56 overflow-auto rounded-md border border-border bg-bg-2 p-3 text-xs leading-relaxed text-text-0">
+                    {configText}
+                  </pre>
+                </div>
+
+                <p className="text-xs text-text-2">
+                  Server: <span className="font-mono text-text-1">{cfg.server_url}</span>.
+                  Keep this config private — it carries your access key.
+                </p>
+              </div>
+            )}
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}

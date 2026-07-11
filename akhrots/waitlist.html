@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Request Access — Akhrot</title>
+  <meta name="description" content="Request access to the Akhrot alpha. Be among the first to experience nature-inspired intelligence." />
+  <link rel="preconnect" href="https://api.fontshare.com" />
+  <link href="https://api.fontshare.com/v2/css?f[]=satoshi@300,400,500,700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css?v=8" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/velocity/1.5.2/velocity.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js" defer></script>
+</head>
+<body class="has-particles">
+
+  <!-- Particle Field -->
+  <canvas id="grid-canvas" aria-hidden="true"></canvas>
+
+  <div id="cursor-dot" aria-hidden="true"></div>
+  <div id="cursor-ring" aria-hidden="true"></div>
+
+  <nav id="navbar">
+    <div class="nav-pill nav-main">
+      <a href="index.html" class="nav-logo"><img src="LOGO.svg" alt="Akhrot" class="logo-img"/></a>
+      <ul class="nav-links">
+        <li><a href="what.html" data-magnetic>What is Akhrot</a></li>
+        <li><a href="about.html" data-magnetic>About</a></li>
+        <li><a href="community.html" data-magnetic>Community</a></li>
+      </ul>
+    </div>
+    <div class="nav-pill nav-cta"><a href="waitlist.html" class="cta-link" data-magnetic>REQUEST ACCESS</a></div>
+  </nav>
+
+  <div class="page-wrapper" style="display:flex;align-items:center;justify-content:center;min-height:100vh">
+    <div class="page-container" style="max-width:700px">
+
+      <div class="fade-in" style="text-align:center;margin-bottom:2.2rem">
+        <p class="page-eyebrow" style="text-align:center;margin-bottom:1.1rem">Alpha Access</p>
+        <h1 class="page-heading" style="text-align:center;font-size:clamp(2.5rem,5vw,4rem);margin-bottom:1.1rem">Join the Alpha</h1>
+        <p style="color:var(--ink-mid);font-size:1.02rem;line-height:1.65;max-width:52ch;margin:0 auto">Akhrot is opening to a small first circle of builders and dreamers.<br />Tell us who you are.</p>
+      </div>
+
+      <!-- 2.5D Form Card -->
+      <div class="form-scene fade-in" id="form-scene">
+        <div class="form-card-3d glass-panel" style="position:relative">
+
+          <div class="form-status" aria-hidden="true">
+            <span class="status-dot"></span>
+            <span>Now accepting requests</span>
+            <span class="status-spots">Limited seats</span>
+          </div>
+
+          <form class="waitlist-form" id="waitlist-form">
+            <div class="input-group">
+              <input type="text" id="name" placeholder=" " autocomplete="name" required />
+              <label for="name">Your name</label>
+            </div>
+            <div class="input-group">
+              <input type="email" id="email" placeholder=" " autocomplete="email" required />
+              <label for="email">Email address</label>
+            </div>
+            <div class="input-group">
+              <input type="text" id="role" placeholder=" " required />
+              <label for="role">Your role or interest</label>
+            </div>
+            <div class="input-group">
+              <textarea id="reason" rows="4" placeholder=" " required></textarea>
+              <label for="reason">What draws you to Akhrot?</label>
+            </div>
+            <button type="submit" class="submit-btn" data-magnetic>
+              <span class="btn-label">Request Access</span>
+              <span class="btn-arrow" aria-hidden="true">&rarr;</span>
+            </button>
+            <p class="form-footnote">Every request is read by a human &mdash; expect a reply within a few days.</p>
+          </form>
+
+          <div class="success-message" id="success-msg" style="display:none; text-align:center;">
+            <div class="success-icon" aria-hidden="true">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            </div>
+            <h3>Request received.</h3>
+            <p style="color:var(--ink-dim);margin-top:0.6rem;">We review every request personally — keep an eye on your inbox.</p>
+          </div>
+
+          <div class="error-message" id="error-msg" style="display:none; text-align:center;">
+            <h3>Something went wrong.</h3>
+            <p style="color:var(--ink-dim);margin-top:0.5rem;">Please try again in a moment.</p>
+          </div>
+
+          <script>
+            (function() {
+              // ═══ PASTE YOUR GOOGLE APPS SCRIPT WEB APP URL BELOW ═══
+              const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwabmx5ER9rV04QJh9GVt0eUAePG1wxbr0TFz9f2Ib-yUimSqGRSTmAcejd47t6jvE/exec';
+
+              const form = document.getElementById('waitlist-form');
+              const btn = form.querySelector('button[type="submit"]');
+              const btnLabel = btn.querySelector('.btn-label') || btn;
+              const btnText = btnLabel.textContent;
+
+              form.addEventListener('submit', async function(e) {
+                e.preventDefault();
+
+                // Prevent double-submit
+                if (btn.disabled) return;
+                btn.disabled = true;
+                btnLabel.textContent = 'Sending…';
+                btn.style.opacity = '0.6';
+
+                const payload = {
+                  name:   document.getElementById('name').value.trim(),
+                  email:  document.getElementById('email').value.trim(),
+                  role:   document.getElementById('role').value.trim(),
+                  reason: document.getElementById('reason').value.trim(),
+                  timestamp: new Date().toISOString()
+                };
+
+                try {
+                  const res = await fetch(SCRIPT_URL, {
+                    method: 'POST',
+                    mode: 'no-cors',          // Apps Script doesn't send CORS headers
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                  });
+
+                  // mode: no-cors means we get an opaque response (status 0)
+                  // but the data still reaches the script. Treat as success.
+                  form.style.display = 'none';
+                  document.querySelector('.form-status').style.display = 'none';
+                  document.getElementById('error-msg').style.display = 'none';
+                  document.getElementById('success-msg').style.display = 'block';
+
+                } catch (err) {
+                  console.error('Waitlist submission failed:', err);
+                  document.getElementById('error-msg').style.display = 'block';
+                  btn.disabled = false;
+                  btnLabel.textContent = btnText;
+                  btn.style.opacity = '1';
+                }
+              });
+            })();
+          </script>
+        </div>
+      </div>
+
+      <!-- Already requested? → invite-code unlock -->
+      <p class="fade-in" style="text-align:center;margin-top:1.6rem;color:var(--ink-mid);font-size:0.95rem">
+        Already requested?
+        <a href="#" id="have-invite-link" data-magnetic style="color:var(--ink-strong,#f5f5f7);text-decoration:underline;text-underline-offset:3px;cursor:pointer;margin-left:0.25rem">Enter your invite code &rarr;</a>
+      </p>
+
+    </div>
+  </div>
+
+  <!-- ═══ Invite-code dialog ═══ -->
+  <div id="invite-overlay" style="display:none;position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,0.62);backdrop-filter:blur(6px);align-items:center;justify-content:center;padding:1.25rem">
+    <div class="glass-panel" style="position:relative;width:100%;max-width:420px;padding:2rem 1.75rem;border-radius:18px;text-align:center">
+      <h3 style="font-size:1.4rem;margin-bottom:0.5rem">Enter invite code</h3>
+      <p style="color:var(--ink-mid);font-size:0.95rem;line-height:1.55;margin-bottom:1.4rem">Paste the invite code you received. We&rsquo;ll take you straight to the app.</p>
+
+      <form id="invite-form">
+        <div class="input-group" style="margin-bottom:1rem">
+          <input type="text" id="invite-code" placeholder=" " autocomplete="off"
+                 style="text-align:center;letter-spacing:0.18em;text-transform:uppercase;font-family:monospace" required />
+          <label for="invite-code">Invite code</label>
+        </div>
+        <p id="invite-error" style="display:none;color:#e06a5a;font-size:0.88rem;margin:-0.4rem 0 0.9rem">Please enter your invite code.</p>
+        <button type="submit" class="submit-btn" data-magnetic style="width:100%">
+          <span class="btn-label">Unlock</span>
+          <span class="btn-arrow" aria-hidden="true">&rarr;</span>
+        </button>
+      </form>
+
+      <button type="button" id="invite-cancel"
+              style="margin-top:1rem;background:none;border:none;color:var(--ink-dim);font-size:0.9rem;cursor:pointer">Cancel</button>
+    </div>
+  </div>
+
+  <script>
+    (function() {
+      'use strict';
+      var APP_URL    = 'https://akhrots.com/app';
+      var overlay    = document.getElementById('invite-overlay');
+      var openLink   = document.getElementById('have-invite-link');
+      var cancelBtn  = document.getElementById('invite-cancel');
+      var inviteForm = document.getElementById('invite-form');
+      var codeInput  = document.getElementById('invite-code');
+      var errEl      = document.getElementById('invite-error');
+
+      function open(e)  { if (e) e.preventDefault(); overlay.style.display = 'flex'; setTimeout(function(){ codeInput.focus(); }, 40); }
+      function close(e) { if (e) e.preventDefault(); overlay.style.display = 'none'; errEl.style.display = 'none'; }
+
+      openLink.addEventListener('click', open);
+      cancelBtn.addEventListener('click', close);
+      overlay.addEventListener('click', function(e){ if (e.target === overlay) close(); });
+      document.addEventListener('keydown', function(e){ if (e.key === 'Escape' && overlay.style.display === 'flex') close(); });
+
+      inviteForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        var code = codeInput.value.trim().toUpperCase();
+        if (!code) { errEl.style.display = 'block'; return; }
+        // Carry the code to the app so the signup flow can pre-fill it.
+        window.location.href = APP_URL + '?invite=' + encodeURIComponent(code);
+      });
+    })();
+  </script>
+
+  <!-- ═══ FOOTER ═══ -->
+  <footer id="main-footer"></footer>
+
+  <script src="script.js"></script>
+  <script src="footer-inject.js"></script>
+  <script src="animations.js"></script>
+  <script>
+  (function(){
+    'use strict';
+
+    /* ─── 2.5D Tilt ─── */
+    const card = document.querySelector('.form-card-3d');
+    if (!card) return;
+    const scene = card.parentElement;
+    scene.addEventListener('mousemove', e => {
+      const r = scene.getBoundingClientRect();
+      const x = (e.clientX - r.left) / r.width - 0.5;
+      const y = (e.clientY - r.top) / r.height - 0.5;
+      card.style.transform = `rotateY(${x*8}deg) rotateX(${-y*5}deg)`;
+    });
+    scene.addEventListener('mouseleave', () => {
+      card.style.transform = 'rotateY(0) rotateX(0)';
+    });
+  })();
+  </script>
+</body>
+</html>

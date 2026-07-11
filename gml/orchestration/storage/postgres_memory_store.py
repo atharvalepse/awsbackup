@@ -1,0 +1,1069 @@
+"""PostgresMemoryStore — pgvector-backed MemoryStore implementation.
+
+Maps each ``MemoryItem`` to a row in the ``memories`` table (see
+``migrations/003_memories.sql``). Embeddings land in the ``vector(384)``
+column, which is what makes a memory retrievable via pgvector — a row with
+``embedding = NULL`` is invisible to :class:`PgvectorSemanticRetriever`.
+
+Embedding-on-write
+------------------
+When constructed with an ``embedder``, :meth:`add_many` computes the vector
+for any item that doesn't already carry one (in
+``raw_metadata["_embedding"]``) so live ingests are immediately
+vector-retrievable. Without an embedder the store still persists the row but
+logs a loud warning and leaves ``embedding = NULL`` — useful only when the
+caller has pre-embedded (e.g. the smoke test) or intends to backfill later.
+
+Why this exists alongside ``JsonlMemoryStore``: same interface, completely
+different operational profile. JSONL is single-tenant, in-memory-after-load,
+single-process. Postgres gives us per-user isolation via RLS, quota
+tracking via the byte-counting trigger, and scales past a single VM.
+
+Per-user behaviour
+------------------
+Every public method takes an optional ``user_id``. When provided, we
+``SET LOCAL app.current_user_id`` inside the same transaction so the RLS
+policy from migration 005 restricts the query to that user's rows. When
+``user_id`` is None and ``GML_ADMIN_BYPASS=1``, we set ``app.is_admin``
+instead (admin tools that legitimately need cross-tenant access).
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
+from orchestration.memory_store.base import MemoryStore
+from orchestration.observability.logging import StructuredLogger
+from orchestration.pipeline.contracts import MemoryItem
+
+
+def _entity_resolution_enabled() -> bool:
+    """Write-time entity resolution (default ON). GML_ENTITY_RESOLUTION=off
+    disables (e.g. before migration 014 is applied)."""
+    return os.environ.get("GML_ENTITY_RESOLUTION", "on").strip().lower() not in {
+        "0", "off", "false", "no",
+    }
+
+
+def _write_gate_enabled() -> bool:
+    """Novelty/conflict write gate (default ON). GML_WRITE_GATE=off disables."""
+    return os.environ.get("GML_WRITE_GATE", "on").strip().lower() not in {
+        "0", "off", "false", "no",
+    }
+
+
+def _gate_thresholds() -> tuple[float, float]:
+    """(touch_sim, related_sim) cosine-similarity thresholds for the gate."""
+    return (
+        float(os.environ.get("GML_TOUCH_SIM", "0.97")),
+        float(os.environ.get("GML_RELATED_SIM", "0.80")),
+    )
+
+
+def _gate_log_enabled() -> bool:
+    """Persist gate decision rationale to gate_decisions (migration 015,
+    default ON). GML_GATE_LOG=off disables, e.g. before 015 is applied —
+    though the writer also degrades gracefully if the table is missing."""
+    return os.environ.get("GML_GATE_LOG", "on").strip().lower() not in {
+        "0", "off", "false", "no",
+    }
+
+
+def _retracted_value(item: MemoryItem) -> str | None:
+    """For a retraction claim ("moved off Heroku"), the departed value.
+
+    Retractions close ALL active claims whose entity or value equals the
+    departed value — not just the nearest neighbour — because "we moved off
+    X" retracts every current belief asserting X, however it was phrased.
+    """
+    rm = item.raw_metadata or {}
+    sjson = rm.get("sjson") or item.aal_sjson or {}
+    if sjson.get("category") == "retraction" or rm.get("sdp_type") == "retraction":
+        return (item.value or sjson.get("object") or "").strip() or None
+    return None
+
+
+def _row_is_retraction(row) -> bool:
+    """Whether a stored row is a retraction claim ("No longer uses X.")."""
+    meta = row["raw_metadata"]
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except (ValueError, json.JSONDecodeError):
+            meta = {}
+    meta = meta or {}
+    sjson = meta.get("sjson") or {}
+    return (
+        sjson.get("category") == "retraction"
+        or meta.get("sdp_type") == "retraction"
+    )
+
+
+def _supersedes_hint(item: MemoryItem) -> bool:
+    """Read the explicit-supersession cue off either metadata channel."""
+    rm = item.raw_metadata or {}
+    if rm.get("supersedes_hint"):
+        return True
+    sjson = rm.get("sjson") or {}
+    return bool(sjson.get("supersedes_hint")) or bool(
+        (item.aal_sjson or {}).get("supersedes_hint")
+    )
+
+
+def _dedupe_id(user_id: str, item: MemoryItem) -> str:
+    """A stable id derived from the *semantic* content of a memory.
+
+    Two MemoryItems with the same (user_id, content, entity, attribute, value)
+    map to the same id; combined with the table's PRIMARY KEY constraint and
+    the existing ``ON CONFLICT (id) DO NOTHING`` clause, re-extracting the
+    same fact (e.g. running the same conversation through ingest twice) is a
+    no-op instead of inserting a duplicate row.
+
+    The prefix preserves the extractor's source convention: ``conv-`` for
+    LLM-extracted, ``aal-`` for SDP-AAL — so existing code that branches on
+    the id prefix keeps working.
+    """
+    prefix = "conv"
+    cur = (item.id or "").strip()
+    if cur.startswith("aal-"):
+        prefix = "aal"
+    payload = "\x1f".join((
+        user_id or "",
+        (item.content or "").strip().lower(),
+        (item.entity or "").strip().lower(),
+        (item.attribute or "").strip().lower(),
+        (item.value or "").strip().lower(),
+    ))
+    digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+    return f"{prefix}-{digest}"
+
+if TYPE_CHECKING:
+    import asyncpg
+
+    from orchestration.embedder.base import Embedder
+
+
+slog = StructuredLogger("memory_store.postgres")
+
+
+def _byte_size(item: MemoryItem) -> int:
+    """Approximate the storage size of a memory for quota accounting.
+
+    Sums the byte length of all text fields. Doesn't include embedding (the
+    vector storage cost is amortized across queries, not per-user).
+    """
+    parts = [item.content or ""]
+    for k in ("entity", "attribute", "value", "summary_short", "summary_medium"):
+        v = getattr(item, k, None)
+        if v:
+            parts.append(str(v))
+    return sum(len(p.encode("utf-8")) for p in parts)
+
+
+class PostgresMemoryStore(MemoryStore):
+    """asyncpg-backed MemoryStore. All methods are async.
+
+    The connection pool is owned by the caller (see
+    :func:`orchestration.storage.get_pg_pool`). Each query acquires a
+    connection from the pool, sets the per-user session vars inside a
+    transaction, runs the query, and releases.
+    """
+
+    def __init__(
+        self, pool: "asyncpg.Pool", embedder: "Embedder | None" = None
+    ) -> None:
+        self.pool = pool
+        # When set, add_many embeds item content before insert so the
+        # vector(384) column is populated and the row is retrievable.
+        self.embedder = embedder
+
+    # ----------------------------------------------------------------------
+    # Internal: per-request session-var wiring for RLS
+    # ----------------------------------------------------------------------
+
+    async def _set_session_vars(
+        self, conn: "asyncpg.Connection", user_id: str | None
+    ) -> None:
+        """Set ``app.current_user_id`` (or ``app.is_admin``) on the current
+        transaction so RLS policies scope queries correctly."""
+        if user_id is None:
+            # Treat None as admin — used for migration scripts, admin tools.
+            await conn.execute("SELECT set_config('app.is_admin', 'true', true)")
+        else:
+            await conn.execute(
+                "SELECT set_config('app.current_user_id', $1, true)", user_id
+            )
+
+    # ----------------------------------------------------------------------
+    # Internal: embedding-on-write
+    # ----------------------------------------------------------------------
+
+    async def _embeddings_for(
+        self, items: list[MemoryItem]
+    ) -> list[list[float] | None]:
+        """Return a vector (or None) for each item, aligned by position.
+
+        A caller-supplied ``raw_metadata["_embedding"]`` wins. For the rest we
+        batch-embed ``item.content`` in a single ``embed_batch`` call. If no
+        embedder is wired in, those entries stay None (row persists with a
+        NULL embedding) and we warn loudly — that row won't match any query
+        until it's backfilled.
+        """
+        out: list[list[float] | None] = [
+            (item.raw_metadata or {}).get("_embedding") for item in items
+        ]
+        missing = [i for i, vec in enumerate(out) if not vec]
+        if not missing:
+            return out
+
+        if self.embedder is None:
+            slog.warning(
+                event="pg_embed_skipped_no_embedder",
+                count=len(missing),
+                note="rows persisted with NULL embedding — not vector-retrievable "
+                     "until backfilled (pass an embedder to PostgresMemoryStore)",
+            )
+            return out
+
+        vectors = await self.embedder.embed_batch(
+            [items[i].content or "" for i in missing]
+        )
+        for i, vec in zip(missing, vectors):
+            out[i] = vec
+        # Alert on any embedding that came back empty/None — previously these
+        # persisted as NULL silently and were never vector-retrievable. The
+        # embed_batch call itself raises on hard failure (propagates); this
+        # catches per-row empties. Backfill via scripts/backfill_embeddings.py.
+        still_null = [items[i].id for i, vec in zip(missing, vectors) if not vec]
+        if still_null:
+            slog.warning(
+                event="pg_embed_returned_empty",
+                count=len(still_null),
+                ids=still_null[:10],
+                note="embedder returned no vector for these rows; they persist "
+                     "with NULL embedding until backfilled",
+            )
+        return out
+
+    # ----------------------------------------------------------------------
+    # MemoryStore ABC
+    # ----------------------------------------------------------------------
+
+    async def load_all(self, user_id: str | None = None) -> list[MemoryItem]:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await self._set_session_vars(conn, user_id)
+                rows = await conn.fetch(
+                    """
+                    SELECT id, content, entity, attribute, value, source,
+                           authority_score, pinned, "timestamp",
+                           raw_metadata, summary_short,
+                           aal_simplemem, aal_sjson, entity_id, is_latest,
+                           valid_from, valid_to
+                    FROM memories
+                    ORDER BY "timestamp" ASC, created_at ASC
+                    """
+                )
+        return [self._row_to_memory_item(r) for r in rows]
+
+    async def load_with_vectors(
+        self, user_id: str | None = None
+    ) -> tuple[list[MemoryItem], dict[str, list[float]]]:
+        """Return ``(items, {id: vector})`` for the user's embedded memories.
+
+        Used to build the memory-graph projection on the Postgres backend,
+        where vectors live in the DB rather than an in-memory retriever cache.
+        Rows with a NULL embedding are skipped (they can't be projected).
+        RLS-scoped to ``user_id`` like every other read.
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await self._set_session_vars(conn, user_id)
+                rows = await conn.fetch(
+                    """
+                    SELECT id, content, entity, attribute, value, source,
+                           authority_score, pinned, "timestamp",
+                           raw_metadata, summary_short,
+                           aal_simplemem, aal_sjson, embedding, entity_id,
+                           is_latest, valid_from, valid_to
+                    FROM memories
+                    WHERE embedding IS NOT NULL
+                    ORDER BY "timestamp" ASC, created_at ASC
+                    """
+                )
+        items: list[MemoryItem] = []
+        vectors: dict[str, list[float]] = {}
+        for r in rows:
+            item = self._row_to_memory_item(r)
+            items.append(item)
+            emb = r["embedding"]
+            if emb is not None:
+                # pgvector returns a numpy array (registered codec) or list.
+                vectors[item.id] = list(emb)
+        return items, vectors
+
+    async def add(self, item: MemoryItem, user_id: str | None = None) -> None:
+        if user_id is None:
+            raise ValueError(
+                "PostgresMemoryStore.add requires user_id "
+                "(every memory must belong to a tenant)"
+            )
+        await self.add_many([item], user_id=user_id)
+
+    # Conversation cards (migration 019) — one row per captured turn.
+    # ----------------------------------------------------------------------
+
+    _CONV_COLS = (
+        'id, user_id, title, summary, user_prompt, ai_response, '
+        'source_url, source_model, facts, fact_count, created_at'
+    )
+
+    @staticmethod
+    def _conv_row_to_dict(r) -> dict:
+        facts = r["facts"]
+        if isinstance(facts, str):
+            try:
+                facts = json.loads(facts)
+            except (json.JSONDecodeError, ValueError):
+                facts = []
+        return {
+            "id": r["id"],
+            "user_id": r["user_id"],
+            "title": r["title"],
+            "summary": r["summary"],
+            "user_prompt": r["user_prompt"],
+            "ai_response": r["ai_response"],
+            "source_url": r["source_url"],
+            "source_model": r["source_model"],
+            "facts": facts or [],
+            "fact_count": r["fact_count"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+
+    async def insert_conversation(
+        self,
+        *,
+        conv_id: str,
+        user_id: str,
+        title: str | None,
+        summary: str | None,
+        user_prompt: str | None,
+        ai_response: str | None,
+        source_url: str | None,
+        source_model: str | None,
+        facts: list | None,
+        embedding=None,
+    ) -> dict:
+        facts = facts or []
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await self._set_session_vars(conn, user_id)
+                row = await conn.fetchrow(
+                    f"""
+                    INSERT INTO conversations
+                      (id, user_id, title, summary, user_prompt, ai_response,
+                       source_url, source_model, facts, fact_count, embedding)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11)
+                    RETURNING {self._CONV_COLS}
+                    """,
+                    conv_id, user_id, title, summary, user_prompt, ai_response,
+                    source_url, source_model, json.dumps(facts), len(facts),
+                    embedding,
+                )
+        return self._conv_row_to_dict(row)
+
+    async def update_conversation(
+        self, conv_id: str, user_id: str | None, *,
+        title: str | None = None, summary: str | None = None,
+        facts: list | None = None,
+    ) -> None:
+        """Patch a card after background enrichment (LLM title/summary + facts)."""
+        facts = facts or []
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await self._set_session_vars(conn, user_id)
+                await conn.execute(
+                    """UPDATE conversations
+                       SET title = COALESCE($2, title),
+                           summary = COALESCE($3, summary),
+                           facts = $4::jsonb,
+                           fact_count = $5
+                       WHERE id = $1""",
+                    conv_id, title, summary, json.dumps(facts), len(facts),
+                )
+
+    async def list_conversations(
+        self, user_id: str | None, limit: int = 50, offset: int = 0,
+        q: str | None = None,
+    ) -> tuple[list[dict], int]:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await self._set_session_vars(conn, user_id)
+                if q:
+                    pattern = f"%{q}%"
+                    total = await conn.fetchval(
+                        """SELECT count(*) FROM conversations
+                           WHERE title ILIKE $1 OR summary ILIKE $1
+                              OR user_prompt ILIKE $1 OR ai_response ILIKE $1""",
+                        pattern,
+                    )
+                    rows = await conn.fetch(
+                        f"""SELECT {self._CONV_COLS} FROM conversations
+                            WHERE title ILIKE $1 OR summary ILIKE $1
+                               OR user_prompt ILIKE $1 OR ai_response ILIKE $1
+                            ORDER BY created_at DESC LIMIT $2 OFFSET $3""",
+                        pattern, limit, offset,
+                    )
+                else:
+                    total = await conn.fetchval("SELECT count(*) FROM conversations")
+                    rows = await conn.fetch(
+                        f"""SELECT {self._CONV_COLS} FROM conversations
+                            ORDER BY created_at DESC LIMIT $1 OFFSET $2""",
+                        limit, offset,
+                    )
+        return [self._conv_row_to_dict(r) for r in rows], int(total or 0)
+
+    async def get_conversation(self, conv_id: str, user_id: str | None = None) -> dict | None:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await self._set_session_vars(conn, user_id)
+                row = await conn.fetchrow(
+                    f"SELECT {self._CONV_COLS} FROM conversations WHERE id = $1",
+                    conv_id,
+                )
+        return self._conv_row_to_dict(row) if row is not None else None
+
+    async def delete_conversation(self, conv_id: str, user_id: str | None = None) -> bool:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await self._set_session_vars(conn, user_id)
+                result = await conn.execute(
+                    "DELETE FROM conversations WHERE id = $1", conv_id,
+                )
+        # asyncpg returns e.g. "DELETE 1" / "DELETE 0".
+        return result != "DELETE 0"
+
+    async def add_many(
+        self, items: list[MemoryItem], user_id: str | None = None
+    ) -> None:
+        if not items:
+            return
+        if user_id is None:
+            raise ValueError("PostgresMemoryStore.add_many requires user_id")
+
+        # Split over-long content into sentence-aligned chunks sharing a
+        # parent_memory_id (no-op for normal atomic facts).
+        from orchestration.ingestion.chunking import expand_chunked
+        items = expand_chunked(items)
+
+        # Fill the vector(384) column. Prefer a caller-supplied embedding
+        # (raw_metadata["_embedding"]); otherwise embed item.content here so
+        # the row is immediately retrievable. Anything still missing after
+        # this lands as NULL (see _embeddings_for for the no-embedder warning).
+        embeddings = await self._embeddings_for(items)
+
+        rows: list[tuple] = []
+        for item, embedding in zip(items, embeddings):
+            # Don't persist the vector a second time inside raw_metadata —
+            # it already lives in the embedding column. A 384-float JSON array
+            # per row is pure bloat.
+            meta = {k: v for k, v in (item.raw_metadata or {}).items()
+                    if k != "_embedding"}
+            # Replace the extractor's random UUID with a hash of the semantic
+            # tuple — same content twice = same id = ON CONFLICT DO NOTHING
+            # silently drops the duplicate instead of writing it again.
+            dedup_id = _dedupe_id(user_id, item)
+            rows.append((
+                dedup_id,
+                user_id,
+                item.content,
+                item.entity,
+                item.attribute,
+                item.value,
+                item.source,
+                float(item.authority_score),
+                bool(item.pinned),
+                item.timestamp if item.timestamp.tzinfo
+                    else item.timestamp.replace(tzinfo=timezone.utc),
+                json.dumps(meta),
+                item.summary_short,
+                embedding,
+                _byte_size(item),
+                # AAL canonical columns (migration 008). Fall back to
+                # content/raw_metadata if the writer didn't set them so
+                # legacy paths still get something in the columns.
+                item.aal_simplemem or item.content,
+                json.dumps(
+                    item.aal_sjson
+                    or (item.raw_metadata or {}).get("sjson")
+                    or {}
+                ),
+                item.parent_memory_id,
+                # Bitemporal (migration 013): valid_from = world time the
+                # fact holds (the claim's own timestamp); valid_to stays NULL
+                # (currently believed) until supersession closes it; tx_time
+                # (system time) takes the column default now().
+                item.timestamp if item.timestamp.tzinfo
+                    else item.timestamp.replace(tzinfo=timezone.utc),
+                # First-class session_id (016) so "memories from this
+                # conversation" is an indexed query, not a JSONB scan.
+                (str(meta.get("session_id")) if meta.get("session_id") else None),
+            ))
+
+        # Entity-resolution pre-pass OUTSIDE the advisory lock. An alias→
+        # entity mapping is immutable once written (entity_aliases is
+        # append-only: ON CONFLICT DO NOTHING, no UPDATE path), so resolving
+        # already-known mentions needs no per-tenant serialization. One
+        # set-based query covers the whole batch; only genuinely new or
+        # ambiguous mentions pay the under-lock resolver below. In steady
+        # state (saturated vocabulary) this removes essentially all entity-
+        # resolution work from the serialized section.
+        pre_resolved: dict[str, str] = {}
+        if _entity_resolution_enabled():
+            from orchestration.storage.entity_resolution import normalize as _er_norm
+            norms = sorted(
+                {_er_norm(item.entity) for item in items
+                 if (item.entity or "").strip()} - {""}
+            )
+            if norms:
+                try:
+                    async with self.pool.acquire() as pre_conn:
+                        await self._set_session_vars(pre_conn, user_id)
+                        known = await pre_conn.fetch(
+                            "SELECT alias_norm, entity_id FROM entity_aliases "
+                            "WHERE user_id = $1 AND alias_norm = ANY($2::text[])",
+                            user_id, norms,
+                        )
+                    pre_resolved = {
+                        r["alias_norm"]: r["entity_id"] for r in known
+                    }
+                except Exception as exc:
+                    # Pre-pass is purely an optimization; the under-lock
+                    # resolver remains the source of truth.
+                    slog.warning(
+                        event="entity_prepass_failed",
+                        error_type=type(exc).__name__,
+                        error=str(exc)[:200],
+                    )
+
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await self._set_session_vars(conn, user_id)
+                # Serialize writes per tenant for the duration of this
+                # transaction. The novelty/conflict gate below reads existing
+                # rows and then writes — without per-user serialization two
+                # concurrent ingests could both miss each other's rows and
+                # make order-dependent decisions. Advisory xact locks release
+                # automatically at commit/rollback.
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext($1))", user_id
+                )
+                # Auto-provision the tenant so a new user's first write doesn't
+                # FK-fail (memories.user_id references users). No-op if it exists.
+                await conn.execute(
+                    "INSERT INTO users (user_id, plan, quota_bytes) "
+                    "VALUES ($1, 'free', 1073741824) ON CONFLICT (user_id) DO NOTHING",
+                    user_id,
+                )
+                # Entity resolution (migration 014): resolve each claim's
+                # entity mention to a canonical per-tenant entity id. Runs
+                # under the advisory lock so gray-zone decisions (provisional
+                # entity vs merge into existing) are deterministic under
+                # concurrent writes. Soft-fails per item: a resolver error
+                # must never lose the claim itself.
+                if _entity_resolution_enabled():
+                    from orchestration.storage.entity_resolution import (
+                        EntityResolver,
+                        normalize as _er_norm,
+                    )
+                    resolver = EntityResolver()
+                    resolved = []
+                    for item, row in zip(items, rows):
+                        eid = None
+                        if (item.entity or "").strip():
+                            # Known alias resolved in the pre-pass — skip the
+                            # under-lock resolver entirely.
+                            eid = pre_resolved.get(_er_norm(item.entity))
+                        if eid is None and (item.entity or "").strip():
+                            try:
+                                # Nested transaction = SAVEPOINT: a SQL error
+                                # inside resolve() would otherwise abort the
+                                # OUTER transaction and lose the whole batch.
+                                async with conn.transaction():
+                                    eid = await resolver.resolve(
+                                        conn, user_id, item.entity
+                                    )
+                            except Exception as exc:
+                                slog.warning(
+                                    event="entity_resolution_failed",
+                                    error_type=type(exc).__name__,
+                                    error=str(exc)[:200],
+                                )
+                        resolved.append(row + (eid,))
+                    rows = resolved
+                else:
+                    rows = [row + (None,) for row in rows]
+                if _write_gate_enabled():
+                    rows = await self._apply_write_gate(
+                        conn, user_id, items, rows
+                    )
+                if rows:
+                    # Re-delivering an identical claim (same dedup id) is
+                    # IDEMPOTENT for belief state: touch timestamp/tx_time,
+                    # never valid_to. Reopening here would let an at-least-once
+                    # redelivery of an old claim resurrect a belief its
+                    # superseder already closed — same logical write-set,
+                    # order-dependent final state. Genuine revival happens
+                    # through new phrasing with an explicit cue ("we're back
+                    # on Heroku"), which inserts a NEW claim via the gate.
+                    # is_latest derives from valid_to by trigger (013).
+                    await conn.executemany(
+                        """
+                        INSERT INTO memories (
+                            id, user_id, content, entity, attribute, value,
+                            source, authority_score, pinned, "timestamp",
+                            raw_metadata, summary_short, embedding, byte_size,
+                            aal_simplemem, aal_sjson, parent_memory_id,
+                            valid_from, session_id, entity_id
+                        ) VALUES (
+                            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                            $11::jsonb, $12, $13, $14, $15, $16::jsonb, $17,
+                            $18, $19, $20
+                        )
+                        ON CONFLICT (id) DO UPDATE
+                            SET "timestamp" = GREATEST(
+                                    memories."timestamp", EXCLUDED."timestamp"),
+                                tx_time = now(),
+                                entity_id = COALESCE(
+                                    EXCLUDED.entity_id, memories.entity_id)
+                        """,
+                        rows,
+                    )
+                # Opt-in supersession: mark prior memories with the same
+                # (entity, attribute) as not-latest so they stop surfacing on
+                # recall. OFF by default — coarse attributes (e.g. 'preference')
+                # are shared across many distinct facts, so eager supersession
+                # would hide valid memories. Conservative: requires BOTH entity
+                # and attribute, excludes the whole just-written batch, and
+                # never touches pinned rows.
+                if os.environ.get("GML_SUPERSEDE_ON_INGEST", "0").lower() in {
+                    "1", "true", "yes", "on",
+                }:
+                    new_ids = [r[0] for r in rows]
+                    pairs = {
+                        (item.entity, item.attribute)
+                        for item in items
+                        if (item.entity or "").strip() and (item.attribute or "").strip()
+                    }
+                    for entity, attribute in pairs:
+                        await conn.execute(
+                            """
+                            UPDATE memories SET valid_to = now()
+                            WHERE user_id = $1 AND entity = $2 AND attribute = $3
+                              AND id <> ALL($4::text[])
+                              AND valid_to IS NULL AND NOT pinned
+                            """,
+                            user_id, entity, attribute, new_ids,
+                        )
+        slog.info(event="pg_memory_added", count=len(items), user_id=user_id)
+
+    async def _apply_write_gate(
+        self, conn, user_id: str, items: list[MemoryItem], rows: list[tuple]
+    ) -> list[tuple]:
+        """Novelty / supersession / conflict gate. Runs inside add_many's
+        transaction, under the per-tenant advisory lock.
+
+        For each incoming claim, find its nearest active (valid_to IS NULL,
+        not pinned) neighbour among rows already in the store (same-batch
+        rows excluded). Then, per the three-tier conflict spec:
+
+          * sim >= touch  OR same signal tokens          → TOUCH: refresh the
+            existing row's timestamp, drop the insert (no duplicate).
+          * related <= sim < touch AND explicit cue       → SUPERSEDE: close
+            the old belief (valid_to=now(), superseded_by link), insert new.
+          * related <= sim < touch, no cue, signals differ→ CONFLICT: keep
+            BOTH active, cross-link conflict_with on both rows. Never silently
+            pick a winner — that's the read path's job to surface.
+
+        Decisions are order-independent: touch is idempotent, supersession
+        requires an explicit cue carried by the claim itself, and conflict
+        links are symmetric. Combined with the advisory lock this is what
+        makes concurrent shuffled write-sets converge to one final state.
+        """
+        from orchestration.sdp.pipeline import _signal_tokens
+
+        touch_sim, related_sim = _gate_thresholds()
+        batch_ids = {r[0] for r in rows}
+        kept: list[tuple] = []
+        stats = {"touched": 0, "superseded": 0, "conflicts": 0}
+        # (claim_id, decision, nearest_id, similarity, reason, matched_signals)
+        # — flushed to gate_decisions (015) after the loop so "why was this
+        # belief touched/closed/flagged?" stays answerable post-hoc.
+        decisions: list[tuple] = []
+
+        for item, row in zip(items, rows):
+            new_id, embedding, meta_json = row[0], row[12], row[10]
+
+            # Retraction: close every active claim asserting the departed
+            # value (entity or value match), then store the retraction claim
+            # itself as a current belief.
+            departed = _retracted_value(item)
+            if departed:
+                await conn.execute(
+                    """
+                    UPDATE memories
+                    SET valid_to = now(),
+                        raw_metadata = coalesce(raw_metadata, '{}'::jsonb)
+                            || jsonb_build_object('superseded_by', $3::text)
+                    WHERE user_id = $1 AND valid_to IS NULL AND NOT pinned
+                      AND (lower(value) = lower($2) OR lower(entity) = lower($2))
+                      AND id <> ALL($4::text[])
+                    """,
+                    user_id, departed, new_id, list(batch_ids),
+                )
+                stats["superseded"] += 1
+                decisions.append(
+                    (new_id, "retract", None, None, "retraction", [departed])
+                )
+                kept.append(row)
+                continue
+
+            if embedding is None:
+                decisions.append(
+                    (new_id, "insert", None, None, "no_embedding", None)
+                )
+                kept.append(row)
+                continue
+            near = await conn.fetchrow(
+                """
+                SELECT id, content, raw_metadata,
+                       1 - (embedding <=> $1) AS sim
+                FROM memories
+                WHERE user_id = $2 AND valid_to IS NULL AND NOT pinned
+                  AND embedding IS NOT NULL AND id <> ALL($3::text[])
+                ORDER BY embedding <=> $1
+                LIMIT 1
+                """,
+                embedding, user_id, list(batch_ids),
+            )
+            if near is None or near["sim"] < related_sim:
+                decisions.append((
+                    new_id, "insert",
+                    near["id"] if near else None,
+                    float(near["sim"]) if near else None,
+                    "below_related" if near else "no_neighbour",
+                    None,
+                ))
+                kept.append(row)
+                continue
+
+            new_signals = _signal_tokens(item.content or "")
+            old_signals = _signal_tokens(near["content"] or "")
+            same_meaning = near["sim"] >= touch_sim or (
+                new_signals == old_signals and bool(new_signals)
+            )
+            # Polarity guard: "Uses Heroku." is near-identical by embedding
+            # and signals to "No longer uses Heroku." — but TOUCHING the
+            # retraction would silently strengthen the OPPOSITE belief. A
+            # positive claim near a retraction is a contradiction (or, with
+            # an explicit cue, a supersession) — never a touch.
+            polarity_guard = same_meaning and _row_is_retraction(near)
+            if polarity_guard:
+                same_meaning = False
+            if same_meaning:
+                await conn.execute(
+                    """
+                    UPDATE memories
+                    SET "timestamp" = GREATEST("timestamp", $2)
+                    WHERE id = $1
+                    """,
+                    near["id"], row[9],
+                )
+                stats["touched"] += 1
+                decisions.append((
+                    new_id, "touch", near["id"], float(near["sim"]),
+                    "sim>=touch" if near["sim"] >= touch_sim else "signals_equal",
+                    sorted(new_signals) if new_signals else None,
+                ))
+                continue
+
+            if _supersedes_hint(item):
+                # Close the old belief's validity interval and link forward.
+                # Nothing is deleted; is_latest syncs via trigger.
+                await conn.execute(
+                    """
+                    UPDATE memories
+                    SET valid_to = now(),
+                        raw_metadata = coalesce(raw_metadata, '{}'::jsonb)
+                            || jsonb_build_object('superseded_by', $2::text)
+                    WHERE id = $1
+                    """,
+                    near["id"], new_id,
+                )
+                meta = json.loads(meta_json or "{}")
+                meta["supersedes"] = near["id"]
+                row = row[:10] + (json.dumps(meta),) + row[11:]
+                stats["superseded"] += 1
+                decisions.append((
+                    new_id, "supersede", near["id"], float(near["sim"]),
+                    "cue+polarity_guard" if polarity_guard else "cue",
+                    sorted(new_signals & old_signals) or None,
+                ))
+                kept.append(row)
+                continue
+
+            # Contradiction without an explicit cue: keep both, cross-link.
+            await conn.execute(
+                """
+                UPDATE memories
+                SET raw_metadata = jsonb_set(
+                    coalesce(raw_metadata, '{}'::jsonb),
+                    '{conflict_with}',
+                    (
+                        SELECT to_jsonb(array_agg(DISTINCT v ORDER BY v))
+                        FROM jsonb_array_elements_text(
+                            coalesce(raw_metadata->'conflict_with', '[]'::jsonb)
+                            || to_jsonb(ARRAY[$2::text])
+                        ) AS t(v)
+                    )
+                )
+                WHERE id = $1
+                """,
+                near["id"], new_id,
+            )
+            meta = json.loads(meta_json or "{}")
+            partners = set(meta.get("conflict_with") or [])
+            partners.add(near["id"])
+            meta["conflict_with"] = sorted(partners)
+            row = row[:10] + (json.dumps(meta),) + row[11:]
+            stats["conflicts"] += 1
+            decisions.append((
+                new_id, "conflict", near["id"], float(near["sim"]),
+                "polarity_guard" if polarity_guard else "no_cue",
+                # The signal tokens the two sides DON'T share are what makes
+                # this a contradiction — exactly what a dashboard should show.
+                sorted(new_signals ^ old_signals) or None,
+            ))
+            kept.append(row)
+
+        if any(stats.values()):
+            slog.info(event="pg_write_gate", user_id=user_id, **stats)
+        if decisions and _gate_log_enabled():
+            try:
+                # SAVEPOINT: a missing gate_decisions table (015 not yet
+                # applied) must never abort the batch's outer transaction.
+                async with conn.transaction():
+                    await conn.executemany(
+                        """
+                        INSERT INTO gate_decisions
+                            (user_id, claim_id, decision, nearest_id,
+                             similarity, reason, matched_signals)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        """,
+                        [(user_id, *d) for d in decisions],
+                    )
+            except Exception as exc:
+                slog.warning(
+                    event="gate_decision_log_failed",
+                    error_type=type(exc).__name__,
+                    error=str(exc)[:200],
+                )
+        return kept
+
+    async def get_lineage(
+        self, memory_id: str, user_id: str | None = None
+    ) -> dict | None:
+        """Full provenance picture for one memory: validity interval,
+        supersession links in both directions, conflict partners, and the
+        write-gate decision ledger (migration 015). Returns None when the
+        memory doesn't exist (or RLS hides it)."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await self._set_session_vars(conn, user_id)
+                row = await conn.fetchrow(
+                    """
+                    SELECT id, user_id, content, valid_from, valid_to,
+                           is_latest, raw_metadata, session_id
+                    FROM memories WHERE id = $1
+                    """,
+                    memory_id,
+                )
+                if row is None:
+                    return None
+                meta = row["raw_metadata"]
+                if isinstance(meta, str):
+                    try:
+                        meta = json.loads(meta)
+                    except (ValueError, json.JSONDecodeError):
+                        meta = {}
+                meta = meta or {}
+
+                # Reverse links: rows whose superseded_by points at us.
+                supersedes = [
+                    r["id"]
+                    for r in await conn.fetch(
+                        """
+                        SELECT id FROM memories
+                        WHERE user_id = $1
+                          AND raw_metadata->>'superseded_by' = $2
+                        """,
+                        row["user_id"], memory_id,
+                    )
+                ]
+                forward = meta.get("supersedes")
+                if isinstance(forward, str) and forward not in supersedes:
+                    supersedes.append(forward)
+
+                decisions: list[dict] = []
+                try:
+                    # SAVEPOINT: tolerate a missing gate_decisions table.
+                    async with conn.transaction():
+                        for d in await conn.fetch(
+                            """
+                            SELECT decision, nearest_id, similarity, reason,
+                                   matched_signals, created_at
+                            FROM gate_decisions
+                            WHERE user_id = $1 AND claim_id = $2
+                            ORDER BY created_at
+                            """,
+                            row["user_id"], memory_id,
+                        ):
+                            decisions.append({
+                                "decision": d["decision"],
+                                "nearest_id": d["nearest_id"],
+                                "similarity": (
+                                    round(float(d["similarity"]), 4)
+                                    if d["similarity"] is not None else None
+                                ),
+                                "reason": d["reason"],
+                                "matched_signals": list(d["matched_signals"] or []),
+                                "created_at": d["created_at"].isoformat(),
+                            })
+                except Exception:
+                    pass
+
+        superseded_by = meta.get("superseded_by")
+        return {
+            "id": row["id"],
+            "valid_from": (
+                row["valid_from"].isoformat() if row["valid_from"] else None
+            ),
+            "valid_to": row["valid_to"].isoformat() if row["valid_to"] else None,
+            "is_latest": bool(row["is_latest"]),
+            "session_id": row["session_id"],
+            "superseded_by": (
+                superseded_by if isinstance(superseded_by, str) else None
+            ),
+            "supersedes": sorted(supersedes),
+            "conflict_with": sorted(meta.get("conflict_with") or []),
+            "gate_decisions": decisions,
+        }
+
+    async def delete(self, memory_id: str, user_id: str | None = None) -> bool:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await self._set_session_vars(conn, user_id)
+                result = await conn.execute(
+                    "DELETE FROM memories WHERE id = $1", memory_id
+                )
+        # asyncpg returns a string like "DELETE 1" or "DELETE 0"
+        deleted = result.endswith(" 1")
+        if deleted:
+            slog.info(
+                event="pg_memory_deleted", memory_id=memory_id, user_id=user_id
+            )
+        return deleted
+
+    # ----------------------------------------------------------------------
+    # Quota helpers (exposed for the /api/me/quota endpoint, Phase 6)
+    # ----------------------------------------------------------------------
+
+    async def get_quota_status(self, user_id: str) -> dict:
+        """Return a dict matching ``user_quota_status`` view's columns."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await self._set_session_vars(conn, user_id)
+                row = await conn.fetchrow(
+                    "SELECT * FROM user_quota_status WHERE user_id = $1",
+                    user_id,
+                )
+        if row is None:
+            return {
+                "user_id": user_id,
+                "quota_bytes": 0,
+                "bytes_used": 0,
+                "pct_used": 0.0,
+                "memory_count": 0,
+                "warned_at_90pct": False,
+                "plan": "unknown",
+            }
+        return dict(row)
+
+    async def check_quota_or_raise(
+        self, user_id: str, new_bytes: int, hard_cap_factor: float = 1.1
+    ) -> tuple[bool, dict]:
+        """Soft-cap quota check used before inserts.
+
+        Returns ``(ok, status_dict)``:
+          * ``ok=True`` and ``warned=True`` in the dict if we crossed 90%.
+            Caller should still proceed but log + set the warned flag.
+          * ``ok=False`` if used + new > quota * hard_cap_factor.
+            Caller should reject the write (HTTP 402).
+        """
+        status = await self.get_quota_status(user_id)
+        used = int(status.get("bytes_used") or 0)
+        quota = int(status.get("quota_bytes") or 0)
+        if quota <= 0:
+            # Unbounded user (admins). Always allow.
+            return True, {**status, "warning": False}
+        projected = used + new_bytes
+        if projected > quota * hard_cap_factor:
+            return False, {**status, "blocked": True, "projected": projected}
+        warned = projected > quota * 0.9
+        return True, {**status, "warning": warned, "projected": projected}
+
+    # ----------------------------------------------------------------------
+    # Row → MemoryItem
+    # ----------------------------------------------------------------------
+
+    @staticmethod
+    def _row_to_memory_item(row) -> MemoryItem:
+        raw_metadata = row["raw_metadata"]
+        if isinstance(raw_metadata, str):
+            try:
+                raw_metadata = json.loads(raw_metadata)
+            except (ValueError, json.JSONDecodeError):
+                raw_metadata = {}
+        aal_sjson = row.get("aal_sjson") if hasattr(row, "get") else None
+        # Rows that don't carry the column (e.g. retriever hit-paths that
+        # already filter valid_to IS NULL in SQL) default to current.
+        is_latest = row.get("is_latest") if hasattr(row, "get") else None
+        # asyncpg can hand JSONB back as either dict or string depending on
+        # the codec set up. Normalize.
+        if isinstance(aal_sjson, str):
+            try:
+                aal_sjson = json.loads(aal_sjson)
+            except (ValueError, json.JSONDecodeError):
+                aal_sjson = None
+        return MemoryItem(
+            id=row["id"],
+            content=row["content"],
+            entity=row["entity"],
+            attribute=row["attribute"],
+            value=row["value"],
+            source=row["source"],
+            authority_score=float(row["authority_score"]),
+            pinned=bool(row["pinned"]),
+            timestamp=row["timestamp"],
+            raw_metadata=raw_metadata or {},
+            summary_short=row["summary_short"],
+            aal_simplemem=row.get("aal_simplemem") if hasattr(row, "get") else None,
+            aal_sjson=aal_sjson if isinstance(aal_sjson, dict) else None,
+            entity_id=row.get("entity_id") if hasattr(row, "get") else None,
+            is_latest=True if is_latest is None else bool(is_latest),
+            valid_from=row.get("valid_from") if hasattr(row, "get") else None,
+            valid_to=row.get("valid_to") if hasattr(row, "get") else None,
+        )

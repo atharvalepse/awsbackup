@@ -1,0 +1,34 @@
+# Retrieved Context
+
+The following information was retrieved from GML memory and may be relevant to the user's query.
+
+{% if reason_from_scratch %}
+*(no prior memory available; the assistant should reason from scratch)*
+{% elif selected %}
+## Memory Items
+
+{% for rh in selected %}
+### {{ loop.index }}. {{ rh.record.source }}
+{% if rh.record.entity %}**Entity:** {{ rh.record.entity }}{% if rh.record.attribute %} / {{ rh.record.attribute }}{% endif %}
+{% endif %}
+
+{{ rh.record.content }}
+
+{% endfor %}
+{% else %}
+*(no relevant context retrieved)*
+{% endif %}
+{% if reasoning_content %}
+
+## SAM Reasoning
+
+{{ reasoning_content }}
+{% endif %}
+
+---
+
+**Provenance:** {{ total_items }} item(s) retrieved from GML memory.
+
+---
+
+User query follows below.

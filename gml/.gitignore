@@ -1,0 +1,162 @@
+# =========================================================================
+#  .gitignore — GML orchestration repo
+#  Goal: keep source code + migrations + small configs tracked; never let a
+#  model weight, dataset, log, or build artifact slip in. The patterns below
+#  are deliberately broad — false-ignores are cheaper than a 5 GB commit.
+# =========================================================================
+
+# ---------- Python ----------
+.venv/
+venv/
+env/
+ENV/
+.python-version
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+
+# ---------- Tooling caches ----------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.cache/
+.hypothesis/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# ---------- Build outputs ----------
+dist/
+build/
+target/
+*.spec
+
+# ---------- IDE / editor ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+*.bak
+*~
+
+# ---------- OS ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+*.lnk
+
+# ---------- Secrets / env files ----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# =========================================================================
+#  Model weights and ML artifacts — NEVER commit these.
+#  Sizes range from MB to tens of GB; reproducible via scripts/finetune_*.py
+#  and HuggingFace downloads.
+# =========================================================================
+
+# Top-level model directory (FT'd LoRA adapters, GGUF, cross-encoders, etc.)
+models/
+
+# Catch-all model file extensions wherever they live in the tree.
+*.gguf
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.tflite
+*.pb
+*.h5
+*.hdf5
+*.msgpack
+
+# Tokenizer + adapter blobs that sometimes land alongside model code.
+tokenizer.json
+*.tokenizer.json
+adapter_model.bin
+adapter_model.safetensors
+
+# Training-run artifact directories.
+checkpoints/
+runs/
+wandb/
+mlruns/
+lightning_logs/
+tb_logs/
+tensorboard/
+output/
+outputs/
+
+# HuggingFace + fastembed local caches (when run from inside the repo).
+.cache/
+.fastembed/
+hf_cache/
+
+# Vector indexes / serialized stores.
+*.faiss
+*.index
+*.npy
+*.npz
+*.arrow
+*.parquet
+
+# Local SQLite or DuckDB files (you might run a local Postgres-substitute
+# for dev — don't let it land in git).
+*.sqlite
+*.sqlite3
+*.db
+*.duckdb
+memory_demo.db*
+
+# =========================================================================
+#  Bench output, datasets, transcripts
+# =========================================================================
+
+# LOCOMO + similar evaluation data (downloaded; reproducible).
+/data/
+/datasets/
+
+# Bench runs (logs, checkpoints, partial results).
+bench_runs/
+*.bench
+*.eval
+
+# Logs.
+*.log
+*.err
+/logs/
+/tmp_local/
+
+# Exported conversation transcripts (large, regenerable, often noisy).
+2025-*-this-session-*.txt
+2026-*-this-session-*.txt
+session-export-*.txt
+
+# =========================================================================
+#  Frontend (web/) — main .gitignore lives in web/.gitignore.
+#  Add a redundant guard here so node_modules etc. never escape that dir.
+# =========================================================================
+**/node_modules/
+**/.next/
+**/.turbo/
+**/out/
+**/build/
+**/.vercel/
+*.tsbuildinfo
+
+# stray Claude Code terminal dumps
+context.txt

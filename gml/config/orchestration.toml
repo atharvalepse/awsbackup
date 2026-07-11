@@ -1,0 +1,31 @@
+retriever_top_k = 50
+reranker_top_k = 10
+# 8 → 12: LOCOMO token-recall analysis showed gold chunks getting squeezed
+# out at k=8 on multi-hop queries (cat-2 recall=0.32). Adding 4 more chunks
+# costs ~30% answerer tokens but preserves more gold material.
+assembler_final_k = 12
+never_drop_recent_n = 3
+safety_margin_pct = 0.10
+recency_half_life_days = 30.0
+
+[ranking_weights]
+# Re-tuned for the cross-encoder score scale. The cross-encoder produces
+# sigmoid-normalized scores in [0,1] with strong discrimination; weighting
+# it at only 0.4 averaged its signal down with less-informative dimensions.
+# Bumping semantic to 0.6 lets the cross-encoder's strong signal dominate
+# while preserving recency/authority/pin tiebreaks.
+semantic = 0.6
+recency = 0.2
+authority = 0.15
+pin = 0.05
+
+[timeouts_per_stage_ms]
+classifier = 2000
+embedder = 2000
+retriever = 3000
+reranker = 500
+sam = 500
+assembler = 500
+translator = 200
+
+[fallback_behaviors]

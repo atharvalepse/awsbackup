@@ -1,0 +1,172 @@
+"""Memory extractor — turns a (user_query, assistant_reply) turn into
+:class:`MemoryItem` records using a local LLM (default: DeepSeek R1 8B via
+the same Ollama client SAM uses).
+
+The extractor prompts the model for structured entity/attribute/value
+extractions. Each extraction becomes a MemoryItem; the Conversation runner
+hands them to the :class:`MemoryStore`.
+
+When the LLM is unavailable or the output can't be parsed, the extractor
+returns an empty list — never raises into the Conversation hot path.
+"""
+import json
+import uuid
+from datetime import datetime, timezone
+
+from orchestration.observability.logging import StructuredLogger
+from orchestration.pipeline.contracts import MemoryItem
+from orchestration.sam._ollama_client import OllamaClient
+
+
+slog = StructuredLogger("ingestion.extractor")
+
+
+DEFAULT_AUTHORITY = 0.6  # mid-trust: extracted from conversation, not authoritative
+
+
+_EXTRACTION_PROMPT = """\
+You are a memory extractor for a long-term AI memory system. You will be
+shown one user→assistant conversation turn. Your job: extract every
+factual claim that could be useful to recall in a future conversation.
+
+EXTRACT EVERY CONCRETE FACT, including (be liberal — when in doubt, extract):
+- User preferences ("user prefers concise replies")
+- Facts about systems / services / tools / people / projects ("auth_service uses FastAPI")
+- Schedule / location / contact facts ("standup is Mondays at 10am PT on Zoom")
+- Decisions, constraints, deadlines, policies ("merge freeze starts Thursday")
+- Versions, configurations, identifiers ("PostgreSQL 16 with read replica")
+- Recent events the user mentioned ("we deployed v2.4.1 to staging yesterday")
+
+ONLY skip extraction for:
+- Pure pleasantries ("hi", "thanks") with no other content
+- Hypothetical / speculative content ("what if we used X")
+- Already-superseded info explicitly marked as outdated in the turn
+
+User query: {user_query!r}
+
+Assistant reply: {assistant_reply!r}
+
+Respond with JSON ONLY, no markdown fences, no prose. Schema:
+
+{{
+  "memories": [
+    {{
+      "content": "<one full-sentence claim worth remembering, written in third person>",
+      "entity": "<subject of the claim — service/person/system name, or null>",
+      "attribute": "<property of the entity (framework/schedule/version/etc.), or null>",
+      "value": "<value of the attribute, or null>",
+      "summary_short": "<6-12 word version, or null>"
+    }}
+  ]
+}}
+
+If the turn truly has nothing factual, return {{"memories": []}}. But default
+to extracting — a memory that turns out unimportant is cheaper than a missing
+one. Most real turns yield 1-5 memories.
+"""
+
+
+def _build_prompt(user_query: str, assistant_reply: str) -> str:
+    return _EXTRACTION_PROMPT.format(
+        user_query=user_query, assistant_reply=assistant_reply
+    )
+
+
+def _parse_extraction(answer: str) -> list[dict]:
+    text = answer.strip()
+    if not text:
+        return []
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1] if "\n" in text else text[3:]
+        if text.endswith("```"):
+            text = text.rsplit("```", 1)[0]
+        text = text.strip()
+    open_idx = text.find("{")
+    close_idx = text.rfind("}")
+    if open_idx < 0 or close_idx <= open_idx:
+        return []
+    try:
+        data = json.loads(text[open_idx : close_idx + 1])
+    except json.JSONDecodeError:
+        return []
+    raw = data.get("memories", [])
+    if not isinstance(raw, list):
+        return []
+    return [m for m in raw if isinstance(m, dict) and m.get("content")]
+
+
+class MemoryExtractor:
+    """LLM-driven extractor producing MemoryItems from a single turn.
+
+    ``client`` is the same :class:`OllamaClient` SAM uses (default
+    ``deepseek-r1:8b``). Pass any other implementation for tests.
+
+    Example:
+        >>> extractor = MemoryExtractor(client=HTTPOllamaClient())
+        >>> items = await extractor.extract(
+        ...     user_query="we ship Friday",
+        ...     assistant_reply="Got it; freezing main from Thursday EOD.",
+        ...     session_id="s-1",
+        ... )
+    """
+
+    def __init__(
+        self,
+        client: OllamaClient,
+        authority_score: float = DEFAULT_AUTHORITY,
+        source: str = "conversation",
+    ) -> None:
+        self.client = client
+        self.authority_score = authority_score
+        self.source = source
+
+    async def extract(
+        self,
+        user_query: str,
+        assistant_reply: str,
+        session_id: str | None = None,
+    ) -> list[MemoryItem]:
+        prompt = _build_prompt(user_query, assistant_reply)
+        try:
+            gen = await self.client.generate(prompt, json_mode=True, temperature=0.0)
+        except Exception as exc:
+            slog.warning(
+                event="extractor_llm_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                degraded_mode=True,
+            )
+            return []
+
+        extractions = _parse_extraction(gen.answer)
+        now = datetime.now(timezone.utc)
+        items: list[MemoryItem] = []
+        for ext in extractions:
+            content = (ext.get("content") or "").strip()
+            if not content:
+                continue
+            try:
+                items.append(MemoryItem(
+                    id=f"conv-{uuid.uuid4().hex[:12]}",
+                    content=content,
+                    summary_short=(ext.get("summary_short") or None),
+                    entity=(ext.get("entity") or None),
+                    attribute=(ext.get("attribute") or None),
+                    value=(ext.get("value") or None),
+                    timestamp=now,
+                    source=self.source,
+                    authority_score=self.authority_score,
+                    pinned=False,
+                    raw_metadata={
+                        "session_id": session_id,
+                        "extracted_by": "deepseek-r1:8b",
+                    },
+                ))
+            except Exception as exc:
+                slog.warning(
+                    event="extractor_record_invalid_skipping",
+                    error=str(exc),
+                    raw=ext,
+                )
+                continue
+        return items

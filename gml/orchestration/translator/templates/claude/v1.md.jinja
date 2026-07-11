@@ -1,0 +1,23 @@
+<context>
+{% if reason_from_scratch %}
+<note>No prior memory available; reason from scratch.</note>
+{% elif selected %}
+{% for rh in selected %}
+<memory id="{{ rh.record.id }}" source="{{ rh.record.source }}"{% if rh.record.entity %} entity="{{ rh.record.entity }}"{% if rh.record.attribute %} attribute="{{ rh.record.attribute }}"{% endif %}{% endif %}>
+{{ rh.record.content }}
+</memory>
+{% endfor %}
+{% else %}
+<note>No relevant context retrieved.</note>
+{% endif %}
+</context>
+{% if reasoning_content %}
+
+<sam_reasoning>
+{{ reasoning_content }}
+</sam_reasoning>
+{% endif %}
+
+<provenance items="{{ total_items }}" source="gml-memory"/>
+
+User query follows below.

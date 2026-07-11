@@ -1,0 +1,250 @@
+"""Memory extractor — turns a (user_query, assistant_reply) turn into
+:class:`MemoryItem` records using a local LLM (default: DeepSeek R1 8B via
+the same Ollama client SAM uses).
+
+The extractor prompts the model for structured entity/attribute/value
+extractions. Each extraction becomes a MemoryItem; the Conversation runner
+hands them to the :class:`MemoryStore`.
+
+When the LLM is unavailable or the output can't be parsed, the extractor
+returns an empty list — never raises into the Conversation hot path.
+"""
+import json
+import uuid
+from datetime import datetime, timezone
+
+from orchestration.observability.logging import StructuredLogger
+from orchestration.pipeline.contracts import MemoryItem
+from orchestration.sam._ollama_client import OllamaClient
+
+
+slog = StructuredLogger("ingestion.extractor")
+
+
+DEFAULT_AUTHORITY = 0.6  # used only when the LLM doesn't return a per-fact confidence
+
+
+# The prompt deliberately uses ABSTRACT placeholders ("<a tool name>") for its
+# illustrative examples — not concrete strings. An earlier version listed
+# "we deployed v2.4.1 to staging yesterday" verbatim and DeepSeek-R1 then
+# regurgitated that exact sentence into real users' memory stores as if it
+# were their own fact (the duplicate-v2.4.1 bug). Treat any concrete example
+# in this prompt as a leak risk.
+_EXTRACTION_PROMPT = """\
+You are a memory extractor for a long-term AI memory system. You are shown
+exactly ONE user→assistant conversation turn. Your job: extract user-facing
+factual claims worth recalling in a future conversation.
+
+Output JSON ONLY, no markdown fences, no commentary. Schema:
+
+{{
+  "memories": [
+    {{
+      "content":       "<one full-sentence claim, written in third person>",
+      "entity":        "<the subject of the claim, or null>",
+      "attribute":     "<which property of the entity, or null>",
+      "value":         "<the value of that property, or null>",
+      "confidence":    <float in [0.0, 1.0] — see scale below>,
+      "summary_short": "<6-12 word version, or null>"
+    }}
+  ]
+}}
+
+DO extract:
+* User preferences / habits / decisions the user just stated.
+* Concrete facts the user shared about systems, tools, projects, people,
+  schedules, locations, identifiers, configurations, versions.
+* Events the user explicitly mentioned ("we shipped X yesterday").
+
+DO NOT extract (return them as no memory):
+* Assistant disclaimers, denials, or admissions of ignorance --
+  e.g. "I don't have your name on file", "I'm not sure", "as an AI...".
+  These are statements about the AI, not facts about the user.
+* Pure pleasantries / acknowledgements -- "Hi", "Thanks", "Got it",
+  "Noted", "Sure", "Sounds good", "You're welcome".
+* Hypothetical / speculative content the user hasn't committed to --
+  "what if we used X", "we could maybe switch to Y".
+* Restatements or paraphrases of the user's previous turn already
+  on record. If the assistant merely echoes a fact, the user already
+  said it -- extract it ONCE (from the user side), not twice.
+* Time-of-day chatter ("good morning", weather), unless the user
+  bound it to a fact ("standup is at 10am").
+
+CONFIDENCE scale (use it -- don't default to 0.6):
+  0.95-1.00  user stated it directly, unambiguous, factual
+  0.80-0.94  user stated it but with mild hedging
+  0.60-0.79  user implied it but didn't say outright
+  0.30-0.59  inferred from context, plausible but not certain
+  <0.30      do NOT include it -- too speculative
+
+For abstract examples only:
+  GOOD: "<entity> uses <tool>" with confidence 0.9 -- the user said it.
+  GOOD: "<entity>'s lead is <person>" with confidence 0.85.
+  BAD:  any assistant denial. Drop it.
+  BAD:  any sentence whose meaning is "I don't know" or "I can't help with that".
+
+User query (verbatim):
+{user_query!r}
+
+Assistant reply (verbatim):
+{assistant_reply!r}
+
+If the turn yields zero memories that pass the rules above, return
+{{"memories": []}}.
+"""
+
+
+def _build_prompt(user_query: str, assistant_reply: str) -> str:
+    return _EXTRACTION_PROMPT.format(
+        user_query=user_query, assistant_reply=assistant_reply
+    )
+
+
+def _parse_extraction(answer: str) -> list[dict]:
+    text = answer.strip()
+    if not text:
+        return []
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1] if "\n" in text else text[3:]
+        if text.endswith("```"):
+            text = text.rsplit("```", 1)[0]
+        text = text.strip()
+    open_idx = text.find("{")
+    close_idx = text.rfind("}")
+    if open_idx < 0 or close_idx <= open_idx:
+        return []
+    try:
+        data = json.loads(text[open_idx : close_idx + 1])
+    except json.JSONDecodeError:
+        return []
+    raw = data.get("memories", [])
+    if not isinstance(raw, list):
+        return []
+    return [m for m in raw if isinstance(m, dict) and m.get("content")]
+
+
+# Belt-and-braces filter that catches obvious assistant-denial / pleasantry
+# output the LLM might emit despite the prompt. Cheap and deterministic.
+_DENIAL_PATTERNS = (
+    "i don't have", "i do not have", "i don't know", "i do not know",
+    "i'm not sure", "i am not sure", "as an ai", "as an llm",
+    "i can't help", "i cannot help", "i can't access", "i cannot access",
+    "i'm unable to", "i am unable to", "i'm sorry, but",
+    "got it",  # the assistant's acknowledgement, not a fact
+    "noted", "sounds good", "you're welcome", "happy to help",
+)
+
+
+def _looks_like_denial_or_pleasantry(content: str) -> bool:
+    lc = content.strip().lower()
+    if not lc:
+        return True
+    # Very short utterances are almost certainly pleasantries.
+    if len(lc) <= 12 and any(p in lc for p in ("hi", "hello", "thanks", "thank you")):
+        return True
+    return any(p in lc for p in _DENIAL_PATTERNS)
+
+
+def _coerce_confidence(raw, fallback: float) -> float:
+    """Clamp the LLM-returned confidence to a sane float in [0,1]."""
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return fallback
+    if v < 0.0:
+        return 0.0
+    if v > 1.0:
+        return 1.0
+    return v
+
+
+class MemoryExtractor:
+    """LLM-driven extractor producing MemoryItems from a single turn.
+
+    ``client`` is the same :class:`OllamaClient` SAM uses (default
+    ``deepseek-r1:8b``). Pass any other implementation for tests.
+
+    Example:
+        >>> extractor = MemoryExtractor(client=HTTPOllamaClient())
+        >>> items = await extractor.extract(
+        ...     user_query="we ship Friday",
+        ...     assistant_reply="Got it; freezing main from Thursday EOD.",
+        ...     session_id="s-1",
+        ... )
+    """
+
+    def __init__(
+        self,
+        client: OllamaClient,
+        authority_score: float = DEFAULT_AUTHORITY,
+        source: str = "conversation",
+    ) -> None:
+        self.client = client
+        self.authority_score = authority_score
+        self.source = source
+
+    async def extract(
+        self,
+        user_query: str,
+        assistant_reply: str,
+        session_id: str | None = None,
+    ) -> list[MemoryItem]:
+        prompt = _build_prompt(user_query, assistant_reply)
+        try:
+            gen = await self.client.generate(prompt, json_mode=True, temperature=0.0)
+        except Exception as exc:
+            slog.warning(
+                event="extractor_llm_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+                degraded_mode=True,
+            )
+            return []
+
+        extractions = _parse_extraction(gen.answer)
+        now = datetime.now(timezone.utc)
+        items: list[MemoryItem] = []
+        dropped_denial = 0
+        for ext in extractions:
+            content = (ext.get("content") or "").strip()
+            if not content:
+                continue
+            if _looks_like_denial_or_pleasantry(content):
+                dropped_denial += 1
+                continue
+            # Per-fact confidence comes from the LLM. The constructor's
+            # `authority_score` is only a fallback for the no-confidence
+            # case (and for tests that don't set it).
+            authority = _coerce_confidence(
+                ext.get("confidence"), fallback=self.authority_score,
+            )
+            try:
+                items.append(MemoryItem(
+                    id=f"conv-{uuid.uuid4().hex[:12]}",
+                    content=content,
+                    summary_short=(ext.get("summary_short") or None),
+                    entity=(ext.get("entity") or None),
+                    attribute=(ext.get("attribute") or None),
+                    value=(ext.get("value") or None),
+                    timestamp=now,
+                    source=self.source,
+                    authority_score=authority,
+                    pinned=False,
+                    raw_metadata={
+                        "session_id": session_id,
+                        "extracted_by": "deepseek-r1:8b",
+                        # Keep the LLM's raw value too, for audit / future
+                        # rerank tuning. authority_score is the canonical one.
+                        "confidence": authority,
+                    },
+                ))
+            except Exception as exc:
+                slog.warning(
+                    event="extractor_record_invalid_skipping",
+                    error=str(exc),
+                    raw=ext,
+                )
+                continue
+        if dropped_denial:
+            slog.info(event="extractor_dropped_denials", count=dropped_denial)
+        return items

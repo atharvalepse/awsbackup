@@ -1,0 +1,7 @@
+{
+  "_comment": "Copy to relay_config.json (gitignored) and edit. Each user has an id and a bearer token. A user's connector registers servers under that token; a user's hosts use the same token to reach them. Tokens are the trust boundary between users.",
+  "users": [
+    { "id": "alice", "token": "alice-dev-token-change-me" },
+    { "id": "bob", "token": "bob-dev-token-change-me" }
+  ]
+}

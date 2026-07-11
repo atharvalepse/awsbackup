@@ -1,0 +1,928 @@
+"""``/api`` HTTP surface for the GML web UI.
+
+This router is the stable contract the Next.js frontend consumes. Every route
+reuses existing orchestration logic — it adds no new memory/pipeline
+behaviour, only an HTTP shape over what the MCP tools and pipeline already do,
+plus a derived cluster/graph view (see :mod:`orchestration.graph_projection`).
+
+Schema mapping (backend → API):
+  * ``importance`` ← ``MemoryItem.authority_score`` (SDP maps its importance
+    score here; LLM-extracted memories carry the extractor's default).
+  * ``confidence`` ← ``raw_metadata["confidence"]`` when present (SDP), else
+    falls back to ``authority_score``.
+  * ``cluster_id`` ← KMeans label from the graph projector (derived, cached).
+
+Registered onto the FastAPI app in :func:`orchestration.server.build_app` via
+``app.include_router(build_api_router(state, run_trace=...))``.
+"""
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import os
+from pathlib import Path
+from typing import TYPE_CHECKING, Awaitable, Callable
+
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import Response, StreamingResponse
+from pydantic import BaseModel, Field
+
+from orchestration import __version__
+from orchestration.graph_projection import GraphProjector
+from orchestration.observability.logging import StructuredLogger
+from orchestration.pipeline import MemoryItem, Pipeline
+from orchestration.pipeline.contracts import Classification, ClassificationSource
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from orchestration.server import ServerState
+
+slog = StructuredLogger("api")
+
+# A run_trace callable: (state, text, user_id=...) -> structured trace dict.
+RunTrace = Callable[..., Awaitable[dict]]
+
+
+# ---------------------------------------------------------------------------
+# Request / response models
+# ---------------------------------------------------------------------------
+
+
+class ApiMemory(BaseModel):
+    id: str
+    content: str
+    entity: str | None = None
+    attribute: str | None = None
+    value: str | None = None
+    confidence: float
+    importance: float
+    cluster_id: int | None = None
+    source: str
+    pinned: bool = False
+    timestamp: str
+    summary_short: str | None = None
+
+
+class MemoryListResponse(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    memories: list[ApiMemory]
+
+
+class Relationship(BaseModel):
+    memory_id: str
+    entity: str | None = None
+    value: str | None = None
+    cluster_id: int | None = None
+    kind: str  # "similarity" | "entity"
+    weight: float | None = None
+
+
+class MemoryDetailResponse(BaseModel):
+    memory: ApiMemory
+    relationships: list[Relationship]
+
+
+class GraphNode(BaseModel):
+    id: str
+    label: str
+    entity: str | None = None
+    value: str | None = None
+    cluster_id: int
+    importance: float
+    val: float
+    x: float
+    y: float
+
+
+class GraphEdge(BaseModel):
+    source: str
+    target: str
+    weight: float
+
+
+class GraphResponse(BaseModel):
+    nodes: list[GraphNode]
+    edges: list[GraphEdge]
+    depth: int
+
+
+class Cluster(BaseModel):
+    id: int
+    label: str
+    centroid: dict
+    size: int
+    color_hint: str
+
+
+class ClusterListResponse(BaseModel):
+    clusters: list[Cluster]
+
+
+class RecallRequest(BaseModel):
+    query: str = Field(min_length=1)
+    top_k: int = Field(5, ge=1, le=50)
+
+
+class RecallResult(BaseModel):
+    memory: ApiMemory
+    score: float
+    why: str | None = None
+
+
+class RecallResponse(BaseModel):
+    query: str
+    results: list[RecallResult]
+
+
+class IngestRequest(BaseModel):
+    user_query: str
+    assistant_reply: str
+
+
+class IngestResponse(BaseModel):
+    mode: str  # "llm" | "sdp"
+    count: int
+    created: list[str]
+    detail: str | None = None
+
+
+class TraceRequest(BaseModel):
+    text: str = Field(min_length=1)
+
+
+class SynthesizeResponse(BaseModel):
+    query: str
+    context: str
+    items_included: int
+
+
+# ---------------------------------------------------------------------------
+# Schema mappers
+# ---------------------------------------------------------------------------
+
+
+def _confidence(item: MemoryItem) -> float:
+    raw = item.raw_metadata.get("confidence")
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    return item.authority_score
+
+
+def _node_label(item: MemoryItem) -> str:
+    if item.entity and item.value:
+        return f"{item.entity}: {item.value[:32]}"
+    if item.entity:
+        return item.entity
+    return item.content[:40]
+
+
+def to_api_memory(item: MemoryItem, cluster_id: int | None) -> ApiMemory:
+    return ApiMemory(
+        id=item.id,
+        content=item.content,
+        entity=item.entity,
+        attribute=item.attribute,
+        value=item.value,
+        confidence=_confidence(item),
+        importance=item.authority_score,
+        cluster_id=cluster_id,
+        source=item.source,
+        pinned=item.pinned,
+        timestamp=item.timestamp.isoformat(),
+        summary_short=item.summary_short,
+    )
+
+
+def _why_matched(item: MemoryItem, query: str) -> str | None:
+    """Cheap, honest 'why this matched' — token overlap on the entity.
+
+    Real SAM reasoning is only produced on the full pipeline path
+    (/api/memory/synthesize, /api/memory/trace), not on raw recall, so we
+    surface a derived hint rather than claim reasoning we didn't run.
+    """
+    if not item.entity:
+        return None
+    q = query.lower()
+    if item.entity.lower() in q or any(
+        tok in q for tok in item.entity.lower().split() if len(tok) >= 4
+    ):
+        return f"matches entity “{item.entity}”"
+    return None
+
+
+def _sse(event: str, data: dict) -> bytes:
+    """Encode one Server-Sent Event frame."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Router factory
+# ---------------------------------------------------------------------------
+
+
+def build_api_router(state: "ServerState", run_trace: RunTrace) -> APIRouter:
+    """Build the ``/api`` router bound to a :class:`ServerState`.
+
+    ``run_trace`` is injected (rather than imported) to avoid a circular
+    import with :mod:`orchestration.server`, which owns the trace logic.
+    """
+    router = APIRouter(prefix="/api", tags=["web"])
+
+    # GraphProjector pulls from an in-memory retriever .records list. That
+    # only exists in JSONL mode; for Postgres we won't build it (graph
+    # endpoint degrades to an empty result and a soft note). When the
+    # in-memory cache IS available, the projector caches its PCA + KMeans
+    # behind .get() and refreshes when len(records) changes.
+    # Built lazily on first use, not at router-construction time: under the
+    # make_app() factory the state is a deferred proxy and state.retriever
+    # isn't available yet. GraphProjector only applies to the in-memory (JSONL)
+    # retriever that exposes .records; Postgres mode stays None (graph degrades).
+    _proj_cache: dict = {"built": False, "proj": None}
+
+    def _projector() -> GraphProjector | None:
+        if not _proj_cache["built"]:
+            _proj_cache["built"] = True
+            if hasattr(state.retriever, "records"):
+                _proj_cache["proj"] = GraphProjector(state.retriever)
+        return _proj_cache["proj"]
+
+    def _projection():
+        """Computed projection (PCA + KMeans) or None on the Postgres backend."""
+        p = _projector()
+        return p.get() if p else None
+
+    async def _projection_for(user_id: str | None):
+        """Per-request projection for either backend (PCA + KMeans + kNN).
+
+        JSONL: the memoized in-memory projector (single tenant). Postgres:
+        build one from this user's stored vectors (RLS-scoped), so the graph
+        is per-tenant. Returns None if there's nothing to project.
+        """
+        p = _projector()
+        if p is not None:
+            return p.get()
+        store = state.memory_store
+        if hasattr(store, "load_with_vectors"):
+            items, vectors = await store.load_with_vectors(user_id)
+            if items and vectors:
+                return GraphProjector.for_items(items, vectors).get()
+        return None
+
+    async def _load_user_memories(user_id: str | None) -> list[MemoryItem]:
+        """Backend-agnostic read of one user's memories.
+
+        Postgres backend: scoped via RLS using the user_id we set on the
+        session var inside the storage adapter.
+        JSONL backend: returns everything (single tenant). ``user_id`` is
+        ignored.
+        """
+        return await state.memory_store.load_all(user_id=user_id)
+
+    # -- health ------------------------------------------------------------
+
+    @router.get("/health")
+    async def api_health() -> dict:
+        # Total memory count: JSONL backend reads the in-memory retriever
+        # cache (fast); Postgres backend reads via SELECT count(*). We do
+        # the cheaper one available.
+        if hasattr(state.retriever, "records"):
+            memories = len(state.retriever.records)
+        else:
+            memories = len(await state.memory_store.load_all())
+        return {
+            "status": "ok",
+            "version": __version__,
+            "memories": memories,
+            "embedder": state.embedder.version,
+        }
+
+    # -- memories ----------------------------------------------------------
+
+    @router.get("/memories", response_model=MemoryListResponse)
+    async def list_memories(
+        request: Request,
+        cluster: int | None = None,
+        limit: int = Query(50, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+    ) -> MemoryListResponse:
+        items = await _load_user_memories(_user_id_from(request))
+        proj = _projection()
+        if cluster is not None and proj:
+            items = [r for r in items if proj.cluster_by_id.get(r.id) == cluster]
+        total = len(items)
+        page = items[offset : offset + limit]
+        return MemoryListResponse(
+            total=total,
+            limit=limit,
+            offset=offset,
+            memories=[
+                to_api_memory(r, proj.cluster_by_id.get(r.id) if proj else None)
+                for r in page
+            ],
+        )
+
+    @router.get("/memories/graph", response_model=GraphResponse)
+    async def memory_graph(
+        request: Request, depth: int = Query(2, ge=1, le=5),
+    ) -> GraphResponse:
+        # Graph projection needs vectors. In JSONL mode they live in the
+        # SemanticRetriever's in-memory cache; in Postgres mode they live in
+        # the DB and we project them per-user (RLS-scoped) on demand. Either
+        # way _projection_for returns a Projection or None (empty graph).
+        uid = _user_id_from(request)
+        proj = await _projection_for(uid)
+        if proj is None:
+            return GraphResponse(nodes=[], edges=[], depth=depth)
+        nodes: list[GraphNode] = []
+        for r in await _load_user_memories(uid):
+            if r.id not in proj.coords_by_id:
+                continue  # not embedded → not in the projection
+            x, y = proj.coords_by_id[r.id]
+            imp = r.authority_score
+            nodes.append(
+                GraphNode(
+                    id=r.id,
+                    label=_node_label(r),
+                    entity=r.entity,
+                    value=r.value,
+                    cluster_id=proj.cluster_by_id.get(r.id, 0),
+                    importance=imp,
+                    val=(max(imp, 0.0) ** 0.5) * 4 + 2,
+                    x=x,
+                    y=y,
+                )
+            )
+        edges = [GraphEdge(**e) for e in proj.edges]
+        return GraphResponse(nodes=nodes, edges=edges, depth=depth)
+
+    @router.get("/memories/{memory_id}", response_model=MemoryDetailResponse)
+    async def get_memory(memory_id: str, request: Request) -> MemoryDetailResponse:
+        items = await _load_user_memories(_user_id_from(request))
+        rec = next((r for r in items if r.id == memory_id), None)
+        if rec is None:
+            raise HTTPException(status_code=404, detail=f"memory {memory_id!r} not found")
+        rec_by_id = {r.id: r for r in items}
+
+        proj = _projection()
+        rels: dict[str, Relationship] = {}
+        if proj:
+            for e in proj.edges:
+                other = None
+                if e["source"] == memory_id:
+                    other = e["target"]
+                elif e["target"] == memory_id:
+                    other = e["source"]
+                if other and other in rec_by_id:
+                    o = rec_by_id[other]
+                    rels[other] = Relationship(
+                        memory_id=other,
+                        entity=o.entity,
+                        value=o.value,
+                        cluster_id=proj.cluster_by_id.get(other),
+                        kind="similarity",
+                        weight=e["weight"],
+                    )
+        # Entity-shared relationships work in both backends — pure metadata join.
+        if rec.entity:
+            for r in items:
+                if r.id != memory_id and r.entity == rec.entity and r.id not in rels:
+                    rels[r.id] = Relationship(
+                        memory_id=r.id,
+                        entity=r.entity,
+                        value=r.value,
+                        cluster_id=proj.cluster_by_id.get(r.id) if proj else None,
+                        kind="entity",
+                    )
+        return MemoryDetailResponse(
+            memory=to_api_memory(rec, proj.cluster_by_id.get(memory_id) if proj else None),
+            relationships=list(rels.values()),
+        )
+
+    @router.delete("/memories/{memory_id}")
+    async def forget(memory_id: str, request: Request) -> dict:
+        async with state._lock:
+            removed = await state.memory_store.delete(
+                memory_id, user_id=_user_id_from(request),
+            )
+            if not removed:
+                raise HTTPException(
+                    status_code=404, detail=f"memory {memory_id!r} not found"
+                )
+            # In-memory retrievers (JSONL backend) maintain their own index;
+            # remove there too. Postgres-backed retrievers have no in-memory
+            # mirror to update — the next query reads the (now-deleted) row
+            # straight from the DB.
+            if hasattr(state.retriever, "remove"):
+                state.retriever.remove([memory_id])
+        slog.info(
+            event="memory_forgotten",
+            memory_id=memory_id, user_id=_user_id_from(request),
+        )
+        return {"deleted": memory_id}
+
+    # -- clusters ----------------------------------------------------------
+
+    @router.get("/clusters", response_model=ClusterListResponse)
+    async def clusters(request: Request) -> ClusterListResponse:
+        proj = await _projection_for(_user_id_from(request))
+        if proj is None:
+            return ClusterListResponse(clusters=[])
+        return ClusterListResponse(clusters=[Cluster(**c) for c in proj.clusters])
+
+    # -- recall / synthesize / trace --------------------------------------
+
+    # Helper — pull the authenticated user_id off request.state. The auth
+    # middleware (server.py) sets it on every authenticated request. Master
+    # admin sees "admin"; we treat that as None (unscoped) for query routing.
+    def _user_id_from(request: Request) -> str | None:
+        uid = getattr(request.state, "user_id", None)
+        return uid if uid and uid != "admin" else None
+
+    # Drop vector hits whose cosine similarity is below this floor BEFORE
+    # they reach the reranker / response. Empirically the embedder happily
+    # returns matches at 0.4-0.5 for queries with only superficial keyword
+    # overlap (e.g. "have I changed my name" pulling in "Semantic Delta
+    # Protocol" because both touch the concept "change/delta"). Anything
+    # under ~0.55 is almost never an actual answer to the user's question.
+    # Overridable via GML_RECALL_SIM_FLOOR for tuning.
+    _SIM_FLOOR = float(os.environ.get("GML_RECALL_SIM_FLOOR", "0.55"))
+
+    @router.post("/memory/recall", response_model=RecallResponse)
+    async def recall(req: RecallRequest, request: Request) -> RecallResponse:
+        classification = Classification(
+            intent_type="question",
+            entities=[],
+            retrieval_hints={},
+            confidence=0.5,
+            source=ClassificationSource.KEYWORD_FALLBACK,
+        )
+        q = Pipeline.build_query(
+            req.query, state.default_target,
+            user_id=_user_id_from(request),
+        )
+        embedded = await state.embedder.embed(q, classification)
+        hits = await state.retriever.get_top_matches(embedded, k=req.top_k)
+        # Similarity floor — filter junk before it lands in the response.
+        # We keep the original top_k bucket from the retriever so any
+        # legitimately-tied hits aren't accidentally truncated; we just
+        # drop the ones below the floor.
+        hits = [h for h in hits if h.similarity >= _SIM_FLOOR]
+        proj = _projection()
+        results = [
+            RecallResult(
+                memory=to_api_memory(h.record, proj.cluster_by_id.get(h.record.id) if proj else None),
+                score=round(h.similarity, 4),
+                why=_why_matched(h.record, req.query),
+            )
+            for h in hits
+        ]
+        return RecallResponse(query=req.query, results=results)
+
+    @router.get("/memory/synthesize", response_model=SynthesizeResponse)
+    async def synthesize(
+        request: Request, query: str = Query(min_length=1)
+    ) -> SynthesizeResponse:
+        q = Pipeline.build_query(
+            query, state.default_target,
+            user_id=_user_id_from(request),
+        )
+        payload = await state.pipeline.run(q)
+        return SynthesizeResponse(
+            query=query,
+            context=payload.formatted_context,
+            items_included=int(payload.metadata.get("items_included", 0) or 0),
+        )
+
+    @router.post("/memory/trace")
+    async def trace(req: TraceRequest, request: Request) -> dict:
+        return await run_trace(state, req.text, user_id=_user_id_from(request))
+
+    @router.post("/memory/recall/stream")
+    async def recall_stream(req: RecallRequest, request: Request) -> StreamingResponse:
+        """Full-pipeline recall with live per-stage progress over SSE.
+
+        Emits ``event: stage`` as each pipeline stage completes (drives the
+        UI's 7-dot indicator from real timing), then ``event: done`` with the
+        reranked results + SAM reasoning. Distinct from ``/memory/recall``,
+        which is the fast raw-retrieval path used for live search.
+        """
+        from orchestration.server import stream_pipeline_trace
+        user_id = _user_id_from(request)
+
+        async def gen():
+            proj = _projection()
+            # Build id→record map from the user's memories. Postgres mode
+            # uses load_all (scoped via RLS); JSONL falls through to the
+            # same call which is just slower but correct.
+            items = await state.memory_store.load_all(user_id=user_id)
+            rec_by_id = {r.id: r for r in items}
+            try:
+                async for kind, payload in stream_pipeline_trace(
+                    state, req.query, user_id=user_id,
+                ):
+                    if kind == "stage":
+                        yield _sse("stage", {
+                            "stage": payload["stage"],
+                            "duration_ms": payload["duration_ms"],
+                        })
+                    elif kind == "done":
+                        ann = payload["annotations"]
+                        results = []
+                        for r in ann["ranked"][: req.top_k]:
+                            rec = rec_by_id.get(r["id"])
+                            if rec is None:
+                                continue
+                            results.append(
+                                RecallResult(
+                                    memory=to_api_memory(rec, proj.cluster_by_id.get(rec.id) if proj else None),
+                                    score=round(r["final_score"], 4),
+                                    why=_why_matched(rec, req.query),
+                                ).model_dump()
+                            )
+                        yield _sse("done", {
+                            "results": results,
+                            "improved_query": ann.get("improved_query"),
+                            "sam_reasoning": ann.get("sam_reasoning"),
+                            "formatted_context": payload["formatted_context"],
+                        })
+            except Exception as exc:  # surface failures as an SSE error event
+                yield _sse("error", {"detail": f"{type(exc).__name__}: {exc}"})
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    @router.post("/memory/trace/stream")
+    async def trace_stream(req: TraceRequest, request: Request) -> StreamingResponse:
+        """Same trace as POST /memory/trace, but streamed stage-by-stage (SSE)."""
+        from orchestration.server import stream_pipeline_trace
+        user_id = _user_id_from(request)
+
+        async def gen():
+            try:
+                async for kind, payload in stream_pipeline_trace(
+                    state, req.text, user_id=user_id,
+                ):
+                    if kind == "stage":
+                        yield _sse("stage", {
+                            "stage": payload["stage"],
+                            "duration_ms": payload["duration_ms"],
+                        })
+                    elif kind == "done":
+                        yield _sse("done", payload)
+            except Exception as exc:
+                yield _sse("error", {"detail": f"{type(exc).__name__}: {exc}"})
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    # -- ingest ------------------------------------------------------------
+    # Both endpoints route through AALConverter so every persisted row gets
+    # canonical {simplemem, sjson} columns populated. Reduces drift between
+    # the two paths and lets retrievers/SAM read either view.
+
+    from orchestration.aal import AALConverter
+    _aal_converter = AALConverter()
+
+    # Background LLM-extraction tasks. The local model on CPU is slow (tens of
+    # seconds), so we never make the client wait on it — extraction runs as a
+    # fire-and-forget task and the memories show up on the next dashboard /
+    # extension refresh. Keep strong refs so tasks aren't GC'd mid-flight.
+    _ingest_tasks: set = set()
+
+    async def _llm_extract_and_store(
+        user_query: str, assistant_reply: str, user_id: str | None
+    ) -> None:
+        try:
+            extracted = await state.extractor.extract(
+                user_query=user_query, assistant_reply=assistant_reply
+            )
+            if not extracted:
+                slog.info(event="api_ingest_bg", mode="llm", count=0,
+                          detail="no durable facts", user_id=user_id)
+                return
+            bundle = _aal_converter.from_extracted_items(extracted)
+            items = bundle.to_memory_items()
+            async with state._lock:
+                await state.memory_store.add_many(items, user_id=user_id)
+                await state.retriever.ingest(items)
+            slog.info(event="api_ingest_bg", mode="llm", count=len(items),
+                      user_id=user_id,
+                      aal_well_formed=sum(1 for r in bundle if r.is_well_formed()))
+        except Exception as exc:  # never crash the loop; just log
+            slog.warning(event="api_ingest_bg_failed",
+                         error_type=type(exc).__name__, error=str(exc),
+                         user_id=user_id)
+
+    @router.post("/memory/ingest", response_model=IngestResponse)
+    async def ingest(req: IngestRequest, request: Request) -> IngestResponse:
+        if state.extractor is None:
+            raise HTTPException(
+                status_code=503,
+                detail="LLM ingest unavailable: MemoryExtractor not initialized "
+                "(start the server with SAM/LLM enabled).",
+            )
+        user_id = _user_id_from(request)
+        task = asyncio.create_task(
+            _llm_extract_and_store(req.user_query, req.assistant_reply, user_id)
+        )
+        _ingest_tasks.add(task)
+        task.add_done_callback(_ingest_tasks.discard)
+        return IngestResponse(
+            mode="llm", count=0, created=[],
+            detail="extraction running in background",
+        )
+
+    @router.post("/memory/sdp_ingest", response_model=IngestResponse)
+    async def sdp_ingest(req: IngestRequest, request: Request) -> IngestResponse:
+        if state.sdp is None:
+            raise HTTPException(
+                status_code=503, detail="sdp_ingest unavailable: SDPPipeline not initialized"
+            )
+        user_id = _user_id_from(request)
+        # Route SDP output through AALConverter — produces AALs whose
+        # sjson carries the SDP-extracted (subject, verb, object, category,
+        # confidence) triples.
+        bundle = _aal_converter.from_turn(
+            req.user_query, req.assistant_reply, sdp_pipeline=state.sdp,
+        )
+        if not bundle.records:
+            return IngestResponse(
+                mode="sdp", count=0, created=[], detail="no pattern-detectable facts"
+            )
+        items = bundle.to_memory_items()
+        n_high = sum(1 for r in bundle if r.importance >= 0.75)
+
+        # Quota check (Postgres only — same pattern as /memory/ingest).
+        if user_id and hasattr(state.memory_store, "check_quota_or_raise"):
+            new_bytes = sum(len(i.content.encode("utf-8")) for i in items)
+            ok, qstatus = await state.memory_store.check_quota_or_raise(
+                user_id, new_bytes,
+            )
+            if not ok:
+                raise HTTPException(
+                    status_code=402,
+                    detail={
+                        "error": "storage_limit_exceeded",
+                        "used_bytes": qstatus.get("bytes_used"),
+                        "quota_bytes": qstatus.get("quota_bytes"),
+                    },
+                )
+            if qstatus.get("warning"):
+                slog.warning(
+                    event="quota_soft_cap_warned",
+                    user_id=user_id,
+                    pct_used=qstatus.get("pct_used"),
+                )
+        async with state._lock:
+            await state.memory_store.add_many(items, user_id=user_id)
+            await state.retriever.ingest(items)
+        slog.info(event="api_ingest", mode="sdp", count=len(items), user_id=user_id)
+        return IngestResponse(
+            mode="sdp",
+            count=len(items),
+            created=[m.id for m in items],
+            detail=f"{n_high}/{len(items)} high-importance",
+        )
+
+    # ----------------------------------------------------------------------
+    # Quota — Phase 6 — only fires on the Postgres backend.
+    # ----------------------------------------------------------------------
+
+    class QuotaStatusResponse(BaseModel):
+        user_id: str
+        plan: str | None = None
+        quota_bytes: int
+        bytes_used: int
+        pct_used: float
+        memory_count: int = 0
+        warned_at_90pct: bool = False
+
+    @router.get("/me/quota", response_model=QuotaStatusResponse)
+    async def my_quota(request: Request) -> QuotaStatusResponse:
+        """Return the authenticated caller's storage quota status. Used by
+        the UI to render the 'X% of 1 GB used' indicator."""
+        user_id = _user_id_from(request)
+        if not user_id:
+            raise HTTPException(
+                status_code=400,
+                detail="quota only applies to authenticated user requests"
+                       " (not admin)",
+            )
+        if not hasattr(state.memory_store, "get_quota_status"):
+            # JSONL backend has no per-user accounting — return a fake
+            # 'unlimited' status so the UI still works.
+            return QuotaStatusResponse(
+                user_id=user_id, plan="dev",
+                quota_bytes=0, bytes_used=0, pct_used=0.0,
+            )
+        status = await state.memory_store.get_quota_status(user_id)
+        return QuotaStatusResponse(
+            user_id=status["user_id"],
+            plan=status.get("plan"),
+            quota_bytes=int(status.get("quota_bytes") or 0),
+            bytes_used=int(status.get("bytes_used") or 0),
+            pct_used=float(status.get("pct_used") or 0.0),
+            memory_count=int(status.get("memory_count") or 0),
+            warned_at_90pct=bool(status.get("warned_at_90pct")),
+        )
+
+    # ----------------------------------------------------------------------
+    # Personalized MCP install surface — issues per-user API keys and returns
+    # **opaque** install links (the raw key is never in a human-readable
+    # field). Cursor gets a deep link with the key base64-embedded; the rest
+    # get download URLs that stream a pre-baked config file. The extension
+    # gets a chrome.identity-compatible SSO flow.
+    # ----------------------------------------------------------------------
+    _key_store_cache: dict = {"store": None}
+
+    async def _key_store():
+        if _key_store_cache["store"] is None:
+            from orchestration.storage import make_user_key_store
+            _key_store_cache["store"] = await make_user_key_store()
+        return _key_store_cache["store"]
+
+    def _mcp_url() -> str:
+        return os.environ.get("GML_PUBLIC_MCP_URL", "https://akhrots.com/mcp")
+
+    def _public_base() -> str:
+        # Default to akhrots.com; override with GML_PUBLIC_BASE_URL if you front
+        # the API at a different origin.
+        return os.environ.get("GML_PUBLIC_BASE_URL", "https://akhrots.com").rstrip("/")
+
+    def _server_block(api_key: str) -> dict:
+        return {
+            "url": _mcp_url(),
+            "headers": {"Authorization": f"Bearer {api_key}"},
+        }
+
+    def _cursor_deeplink(api_key: str) -> str:
+        cfg_b64 = base64.urlsafe_b64encode(
+            json.dumps(_server_block(api_key)).encode("utf-8")
+        ).decode("ascii")
+        return (
+            "cursor://anysphere.cursor-deeplink/mcp/install"
+            f"?name=akhrot-memory&config={cfg_b64}"
+        )
+
+    def _vscode_deeplink(api_key: str) -> str:
+        # VS Code's MCP-install handler (Copilot Chat MCP). The shape mirrors
+        # Cursor: a single server entry base64-encoded into the URL.
+        entry = {
+            "name": "akhrot-memory",
+            "type": "http",
+            "url": _mcp_url(),
+            "headers": {"Authorization": f"Bearer {api_key}"},
+        }
+        cfg_b64 = base64.urlsafe_b64encode(
+            json.dumps(entry).encode("utf-8")
+        ).decode("ascii")
+        return f"vscode://GitHub.copilot-chat/mcp/install?config={cfg_b64}"
+
+    def _config_file_bytes(api_key: str) -> bytes:
+        """The {mcpServers:{akhrot-memory:{...}}} config most IDEs accept."""
+        cfg = {"mcpServers": {"akhrot-memory": _server_block(api_key)}}
+        return json.dumps(cfg, indent=2).encode("utf-8")
+
+    class McpConfigResponse(BaseModel):
+        """Install bundle for the signed-in user.
+
+        Note: this response never carries the raw API key as a readable field.
+        The key is embedded (base64) inside `cursor_deeplink` / `vscode_deeplink`
+        and is what the download URLs serve when fetched. UI is expected to
+        render buttons against these opaque URLs, not display them as text.
+        """
+
+        client: str
+        server_url: str
+        cursor_deeplink: str
+        vscode_deeplink: str
+        # Each `install_url_*` streams a downloadable JSON config file.
+        install_url_claude_desktop: str
+        install_url_windsurf: str
+        install_url_generic: str
+        # Extension download URL (Bearer-authed; dashboard fetches as a blob
+        # and triggers a save dialog via JS). The "bind extension" flow is a
+        # separate endpoint (/api/me/extension-bind) the dashboard calls.
+        extension_download_url: str
+
+    @router.post("/me/mcp-config", response_model=McpConfigResponse)
+    async def my_mcp_config(
+        request: Request, client: str = Query("generic"),
+    ) -> McpConfigResponse:
+        user_id = _user_id_from(request)
+        if not user_id:
+            raise HTTPException(status_code=401, detail="sign in to get an MCP config")
+        store = await _key_store()
+        if not hasattr(store, "issue"):
+            raise HTTPException(
+                status_code=501,
+                detail="MCP config requires the Postgres backend (per-user keys)",
+            )
+        rec = await store.issue(user_id, label=f"mcp-{client}")
+        slog.info(event="mcp_config_issued", user_id=user_id, client=client)
+        base = _public_base()
+        return McpConfigResponse(
+            client=client,
+            server_url=_mcp_url(),
+            cursor_deeplink=_cursor_deeplink(rec.key),
+            vscode_deeplink=_vscode_deeplink(rec.key),
+            # Cookie-auth on these — the signed-in user's browser fetches and
+            # the response includes the file as an attachment. A fresh per-call
+            # key is minted on each fetch so URLs aren't long-lived secrets.
+            install_url_claude_desktop=f"{base}/api/me/install/claude-desktop",
+            install_url_windsurf=f"{base}/api/me/install/windsurf",
+            install_url_generic=f"{base}/api/me/install/generic",
+            extension_download_url=f"{base}/api/me/extension-download",
+        )
+
+    # ── Per-IDE install file downloads ─────────────────────────────────────
+    # These stream a single config file. Each call mints a fresh per-user key
+    # — there's no point pretending the URL is idempotent, the file *is* the
+    # secret. The dashboard fires these via <a download> so the browser saves
+    # them to the user's downloads folder, where they drag/drop them into the
+    # IDE's MCP config path (shown in the dialog).
+    def _attachment(name: str, body: bytes) -> Response:
+        return Response(
+            content=body,
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="{name}"',
+                "Cache-Control": "no-store",
+            },
+        )
+
+    async def _issue_or_401(request: Request, label: str):
+        user_id = _user_id_from(request)
+        if not user_id:
+            raise HTTPException(status_code=401, detail="sign in to install")
+        store = await _key_store()
+        if not hasattr(store, "issue"):
+            raise HTTPException(status_code=501,
+                                detail="install requires the Postgres backend")
+        return user_id, await store.issue(user_id, label=label)
+
+    @router.get("/me/install/claude-desktop")
+    async def install_claude_desktop(request: Request) -> Response:
+        _, rec = await _issue_or_401(request, "install-claude-desktop")
+        return _attachment("claude_desktop_config.json", _config_file_bytes(rec.key))
+
+    @router.get("/me/install/windsurf")
+    async def install_windsurf(request: Request) -> Response:
+        _, rec = await _issue_or_401(request, "install-windsurf")
+        return _attachment("mcp_config.json", _config_file_bytes(rec.key))
+
+    @router.get("/me/install/generic")
+    async def install_generic(request: Request) -> Response:
+        _, rec = await _issue_or_401(request, "install-generic")
+        return _attachment("akhrot-mcp-config.json", _config_file_bytes(rec.key))
+
+    # ── Chrome extension binding ──────────────────────────────────────────
+    # The dashboard (which has the user's JWT in localStorage) calls this
+    # with a Bearer token to mint a fresh long-lived MCP key for the
+    # extension, then pushes the key to the installed extension via
+    # `chrome.runtime.sendMessage(EXTENSION_ID, ...)` — the extension's
+    # `externally_connectable` allowlists akhrots.com so it accepts that
+    # message. The user never sees the key text; it lives only in extension
+    # storage + this server.
+    class ExtensionBindResponse(BaseModel):
+        user_id: str
+        token: str
+
+    @router.post("/me/extension-bind", response_model=ExtensionBindResponse)
+    async def extension_bind(request: Request) -> ExtensionBindResponse:
+        user_id = _user_id_from(request)
+        if not user_id:
+            raise HTTPException(status_code=401, detail="sign in to bind extension")
+        store = await _key_store()
+        if not hasattr(store, "issue"):
+            raise HTTPException(status_code=501,
+                                detail="extension binding requires the Postgres backend")
+        rec = await store.issue(user_id, label="extension")
+        slog.info(event="extension_bind", user_id=user_id)
+        return ExtensionBindResponse(user_id=user_id, token=rec.key)
+
+    # ── Chrome extension download (one zip; auth required) ───────────────
+    # The dashboard wires "Download extension" to this URL. We require a
+    # signed-in user so anonymous scrapers don't pull the artifact.
+    @router.get("/me/extension-download")
+    async def extension_download(request: Request) -> Response:
+        user_id = _user_id_from(request)
+        if not user_id:
+            raise HTTPException(status_code=401, detail="sign in to download")
+        path = Path(
+            os.environ.get("AKHROT_EXTENSION_ZIP",
+                           "/var/www/akhrots/static/akhrot-extension.zip")
+        )
+        if not path.exists():
+            raise HTTPException(status_code=503, detail="extension build not available")
+        slog.info(event="extension_download", user_id=user_id, size=path.stat().st_size)
+        return Response(
+            content=path.read_bytes(),
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": 'attachment; filename="akhrot-extension.zip"',
+                "Cache-Control": "no-store",
+            },
+        )
+
+    return router

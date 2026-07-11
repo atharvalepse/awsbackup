@@ -1,0 +1,294 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import {
+  X,
+  Loader2,
+  ExternalLink,
+  Download,
+  Puzzle,
+  Check,
+  ChevronDown,
+  ChevronUp,
+} from "lucide-react";
+import { useAppStore } from "@/stores/app-store";
+import { api, type McpConfigResponse } from "@/lib/api";
+import { toast } from "@/stores/toast-store";
+
+/**
+ * "Connect your AI" — install buttons only. Deliberately does NOT render the
+ * raw config JSON anywhere; the user's API key lives inside opaque deeplinks
+ * and inside files served by the install endpoints, never as readable text on
+ * screen.
+ */
+export function McpInstallDialog() {
+  const open = useAppStore((s) => s.mcpOpen);
+  const setOpen = useAppStore((s) => s.setMcpOpen);
+  const [cfg, setCfg] = useState<McpConfigResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [extState, setExtState] = useState<"idle" | "binding" | "done" | "missing">("idle");
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setCfg(null);
+    setExtState("idle");
+    setShowAdvanced(false);
+    setLoading(true);
+    api
+      .mcpConfig("generic")
+      .then(setCfg)
+      .catch((e) => toast.error("Couldn’t generate install bundle", (e as Error).message))
+      .finally(() => setLoading(false));
+  }, [open]);
+
+  // Download an install file via fetch + blob — keeps the URL out of the
+  // browser's address bar and avoids opening a tab for the JSON.
+  const downloadFile = async (url: string, filename: string, label: string) => {
+    try {
+      const blob = await api.downloadInstall(url);
+      const objUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objUrl;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(objUrl);
+      toast.success(`${label} ready`, "Saved to your downloads.");
+    } catch (e) {
+      toast.error(`${label} failed`, (e as Error).message);
+    }
+  };
+
+  // Push a freshly-issued key into the installed extension via
+  // chrome.runtime.sendMessage. The extension must list akhrots.com in its
+  // `externally_connectable.matches`; if it isn't installed (or its ID is
+  // wrong), we fall back to "missing" so the user can install it first.
+  const bindExtension = async () => {
+    const extId = process.env.NEXT_PUBLIC_AKHROT_EXTENSION_ID || "";
+    setExtState("binding");
+    try {
+      const { token, user_id } = await api.extensionBind();
+      // Minimal shape we use — avoids pulling @types/chrome into the web build.
+      type ExtMessageReply = { ok?: boolean; error?: string } | undefined;
+      type ChromeForExt = {
+        runtime?: {
+          sendMessage?: (
+            extensionId: string,
+            message: unknown,
+            cb: (resp: ExtMessageReply) => void,
+          ) => void;
+          lastError?: { message?: string } | null;
+        };
+      };
+      const chromeApi = (window as unknown as { chrome?: ChromeForExt }).chrome;
+      if (!chromeApi?.runtime?.sendMessage || !extId) {
+        setExtState("missing");
+        return;
+      }
+      chromeApi.runtime.sendMessage(
+        extId,
+        { type: "AKHROT_BIND", token, user_id },
+        (resp: ExtMessageReply) => {
+          const err = chromeApi.runtime?.lastError;
+          if (err || !resp?.ok) {
+            setExtState("missing");
+            return;
+          }
+          setExtState("done");
+          toast.success("Extension connected", "You're signed in everywhere.");
+        },
+      );
+    } catch (e) {
+      setExtState("idle");
+      toast.error("Couldn’t connect extension", (e as Error).message);
+    }
+  };
+
+  return (
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          className="fixed inset-0 z-[55] flex items-center justify-center p-4"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.15 }}
+          onClick={() => setOpen(false)}
+        >
+          <div className="absolute inset-0 bg-[rgba(5,5,7,0.7)] backdrop-blur-sm" />
+          <motion.div
+            role="dialog"
+            aria-modal="true"
+            initial={{ opacity: 0, scale: 0.97, y: 8 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.97, y: 8 }}
+            transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+            onClick={(e) => e.stopPropagation()}
+            className="relative z-10 w-full max-w-md rounded-xl border border-border-strong bg-bg-1 p-6"
+          >
+            <div className="mb-5 flex items-start justify-between">
+              <div>
+                <h2 className="text-lg font-medium text-text-0">Connect your AI</h2>
+                <p className="mt-1 text-sm text-text-1">
+                  One click per tool. Nothing to copy.
+                </p>
+              </div>
+              <button
+                onClick={() => setOpen(false)}
+                className="flex h-7 w-7 items-center justify-center rounded-sm text-text-2 hover:bg-bg-3 hover:text-text-0"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {loading || !cfg ? (
+              <div className="flex h-44 items-center justify-center text-text-2">
+                <Loader2 className="h-5 w-5 animate-spin" />
+              </div>
+            ) : (
+              <div className="space-y-2.5">
+                {/* Cursor — native deeplink, one click installs the MCP. */}
+                <a
+                  href={cfg.cursor_deeplink}
+                  className="flex w-full items-center justify-between gap-2 rounded-md bg-accent px-4 py-2.5 text-sm font-medium text-bg-0 transition-opacity hover:opacity-90"
+                >
+                  <span className="flex items-center gap-2">
+                    <ExternalLink className="h-4 w-4" /> Install for Cursor
+                  </span>
+                  <span className="text-xs opacity-70">opens Cursor</span>
+                </a>
+
+                {/* VS Code — deeplink (Copilot Chat MCP). */}
+                <a
+                  href={cfg.vscode_deeplink}
+                  className="flex w-full items-center justify-between gap-2 rounded-md border border-border-strong bg-bg-2 px-4 py-2.5 text-sm font-medium text-text-0 transition-colors hover:bg-bg-3"
+                >
+                  <span className="flex items-center gap-2">
+                    <ExternalLink className="h-4 w-4" /> Install for VS Code
+                  </span>
+                  <span className="text-xs text-text-2">opens VS Code</span>
+                </a>
+
+                {/* Claude Desktop — downloads claude_desktop_config.json. */}
+                <button
+                  onClick={() => downloadFile(
+                    cfg.install_url_claude_desktop,
+                    "claude_desktop_config.json",
+                    "Claude Desktop config",
+                  )}
+                  className="flex w-full items-center justify-between gap-2 rounded-md border border-border-strong bg-bg-2 px-4 py-2.5 text-sm font-medium text-text-0 transition-colors hover:bg-bg-3"
+                >
+                  <span className="flex items-center gap-2">
+                    <Download className="h-4 w-4" /> Install for Claude Desktop
+                  </span>
+                  <span className="text-xs text-text-2">downloads .json</span>
+                </button>
+
+                {/* Windsurf — downloads mcp_config.json. */}
+                <button
+                  onClick={() => downloadFile(
+                    cfg.install_url_windsurf,
+                    "mcp_config.json",
+                    "Windsurf config",
+                  )}
+                  className="flex w-full items-center justify-between gap-2 rounded-md border border-border-strong bg-bg-2 px-4 py-2.5 text-sm font-medium text-text-0 transition-colors hover:bg-bg-3"
+                >
+                  <span className="flex items-center gap-2">
+                    <Download className="h-4 w-4" /> Install for Windsurf
+                  </span>
+                  <span className="text-xs text-text-2">downloads .json</span>
+                </button>
+
+                {/* Chrome extension — install zip + push-token via runtime msg. */}
+                <div className="mt-4 rounded-md border border-border-strong bg-bg-2 p-3">
+                  <div className="mb-2 flex items-center gap-2 text-sm font-medium text-text-0">
+                    <Puzzle className="h-4 w-4" /> Chrome extension
+                  </div>
+                  <div className="space-y-2">
+                    <button
+                      onClick={() => downloadFile(
+                        cfg.extension_download_url,
+                        "akhrot-extension.zip",
+                        "Extension",
+                      )}
+                      className="flex w-full items-center justify-between gap-2 rounded-sm border border-border bg-bg-1 px-3 py-2 text-xs text-text-0 transition-colors hover:bg-bg-3"
+                    >
+                      <span className="flex items-center gap-2">
+                        <Download className="h-3.5 w-3.5" /> Download extension
+                      </span>
+                      <span className="text-text-2">.zip — Load unpacked</span>
+                    </button>
+                    <button
+                      onClick={bindExtension}
+                      disabled={extState === "binding" || extState === "done"}
+                      className="flex w-full items-center justify-between gap-2 rounded-sm border border-border bg-bg-1 px-3 py-2 text-xs text-text-0 transition-colors hover:bg-bg-3 disabled:cursor-default disabled:opacity-70"
+                    >
+                      <span className="flex items-center gap-2">
+                        {extState === "binding" ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : extState === "done" ? (
+                          <Check className="h-3.5 w-3.5" />
+                        ) : (
+                          <Puzzle className="h-3.5 w-3.5" />
+                        )}
+                        {extState === "done"
+                          ? "Extension signed in"
+                          : extState === "missing"
+                          ? "Install the extension first, then click again"
+                          : extState === "binding"
+                          ? "Connecting…"
+                          : "Sign extension in to this account"}
+                      </span>
+                    </button>
+                  </div>
+                  <p className="mt-2 text-[11px] leading-relaxed text-text-2">
+                    The first time, unzip and load it via{" "}
+                    <span className="font-mono">chrome://extensions</span> → enable
+                    Developer mode → <em>Load unpacked</em>. After that,{" "}
+                    <em>Sign in</em> pushes your account into the extension —
+                    nothing to paste.
+                  </p>
+                </div>
+
+                {/* Advanced: server URL + generic config download (power users
+                    on unsupported clients who still want a JSON they can drop
+                    in by hand). The path stays one click — no token text on
+                    screen. */}
+                <button
+                  onClick={() => setShowAdvanced((s) => !s)}
+                  className="flex w-full items-center justify-between gap-2 px-1 pt-2 text-xs text-text-2 hover:text-text-0"
+                >
+                  <span>Advanced</span>
+                  {showAdvanced ? (
+                    <ChevronUp className="h-3.5 w-3.5" />
+                  ) : (
+                    <ChevronDown className="h-3.5 w-3.5" />
+                  )}
+                </button>
+                {showAdvanced && (
+                  <div className="space-y-1 px-1 pb-1 text-xs">
+                    <div>
+                      <span className="text-text-2">Server: </span>
+                      <span className="font-mono text-text-0">{cfg.server_url}</span>
+                    </div>
+                    <button
+                      onClick={() => downloadFile(
+                        cfg.install_url_generic,
+                        "akhrot-mcp-config.json",
+                        "Generic config",
+                      )}
+                      className="text-text-1 underline-offset-2 hover:underline"
+                    >
+                      Download generic MCP config (.json)
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}

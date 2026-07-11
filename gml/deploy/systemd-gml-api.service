@@ -1,0 +1,24 @@
+[Unit]
+Description=GML orchestration FastAPI server
+After=network.target
+
+[Service]
+Type=simple
+User=gml
+WorkingDirectory=/opt/gml
+Environment="PATH=/opt/gml/.venv/bin:/usr/bin:/bin"
+Environment="GML_API_KEY=REPLACE_ME_WITH_MASTER_KEY"
+Environment="GML_USER_KEYS_FILE=/opt/gml/data/users.jsonl"
+Environment="GML_CORS_ORIGINS=https://gml.example.com"
+Environment="GML_LLM_BACKEND=transformers"
+Environment="GML_TRANSFORMERS_BASE=Qwen/Qwen2.5-3B-Instruct"
+Environment="GML_TRANSFORMERS_ADAPTER=/opt/gml/models/qwen_locomo_ft/adapter"
+Environment="GML_TRANSFORMERS_DEVICE=cuda"
+Environment="GML_CE_ENSEMBLE=/opt/gml/models/ce_locomo_ft|jinaai/jina-reranker-v2-base-multilingual|0.7"
+Environment="GML_TEMPORAL_AWARE=1"
+ExecStart=/opt/gml/.venv/bin/uvicorn orchestration.server:make_app --factory --host 127.0.0.1 --port 8000 --workers 1
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

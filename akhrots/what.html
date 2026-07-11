@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>What is Akhrot? — Intelligence was never artificial.</title>
+  <meta name="description" content="Akhrot is not another AI tool. It is an evolving intelligence ecosystem designed to think, adapt, create, and collaborate like a living extension of human imagination." />
+  <link rel="preconnect" href="https://api.fontshare.com" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://api.fontshare.com/v2/css?f[]=satoshi@300,400,500,600,700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css?v=8" />
+  <link rel="stylesheet" href="what.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js" defer></script>
+</head>
+<body class="what-body">
+
+  <!-- Cursor -->
+  <div id="cursor-dot" aria-hidden="true"></div>
+  <div id="cursor-ring" aria-hidden="true"></div>
+
+  <!-- Navbar -->
+  <nav id="navbar">
+    <div class="nav-pill nav-main">
+      <a href="index.html" class="nav-logo" aria-label="Akhrot Home">
+        <img src="LOGO.svg" alt="Akhrot" class="logo-img" />
+      </a>
+      <ul class="nav-links">
+        <li><a href="what.html" class="active" data-magnetic>What is Akhrot</a></li>
+        <li><a href="about.html" data-magnetic>About</a></li>
+        <li><a href="community.html" data-magnetic>Community</a></li>
+      </ul>
+    </div>
+    <div class="nav-pill nav-cta">
+      <a href="waitlist.html" class="cta-link" data-magnetic>REQUEST ACCESS</a>
+    </div>
+  </nav>
+
+  <!-- Scroll progress rail -->
+  <aside class="what-rail" aria-hidden="true">
+    <div class="rail-track"><div class="rail-fill"></div></div>
+    <ul class="rail-chapters">
+      <li data-chapter="01">Intro</li>
+      <li data-chapter="02">The Idea</li>
+      <li data-chapter="03">Why</li>
+      <li data-chapter="04">Building</li>
+      <li data-chapter="05">Philosophy</li>
+      <li data-chapter="06">Different</li>
+      <li data-chapter="07">Vision</li>
+      <li data-chapter="08">Now</li>
+      <li data-chapter="09">Welcome</li>
+    </ul>
+  </aside>
+
+  <!-- Floating chapter marker (top-right) -->
+  <div class="what-marker" aria-hidden="true">
+    <span class="marker-num">01</span>
+    <span class="marker-divider"></span>
+    <span class="marker-name">Intro</span>
+  </div>
+
+  <main class="what-main">
+
+    <!-- ─── SCENE 01 · HERO ─── -->
+    <section class="scene scene-hero" data-num="01" data-name="Intro">
+      <div class="scene-inner">
+        <div class="scene-tag" data-reveal>
+          <span class="dot"></span>
+          <span>What is Akhrot?</span>
+        </div>
+        <h1 class="hero-title">
+          <span class="line"><span class="word">Intelligence</span></span>
+          <span class="line"><span class="word">was</span> <span class="word">never</span></span>
+          <span class="line"><span class="word accent">artificial.</span></span>
+        </h1>
+        <div class="hero-body">
+          <p data-reveal>Akhrot is not another AI tool.</p>
+          <p data-reveal>It is an <strong>evolving intelligence ecosystem</strong> designed to think, adapt, create, and collaborate like a living extension of human imagination.</p>
+        </div>
+        <div class="hero-pivot">
+          <p data-reveal class="pivot-line"><span class="pivot-q">Most AI today is built to</span> <em class="dimmed">answer</em>.</p>
+          <p data-reveal class="pivot-line emphasis"><span class="pivot-q">Akhrot is being built to</span> <em class="accent grow-underline">understand</em>.</p>
+        </div>
+      </div>
+      <div class="scroll-cue" aria-hidden="true">
+        <span>Scroll</span>
+        <span class="cue-bar"></span>
+      </div>
+    </section>
+
+    <!-- ─── SCENE 02 · THE IDEA ─── -->
+    <section class="scene scene-idea" data-num="02" data-name="The Idea">
+      <div class="scene-inner two-col">
+        <div class="col-text">
+          <span class="scene-eyebrow" data-reveal>The Idea</span>
+          <h2 class="scene-h2">
+            <span class="line"><span class="word">The</span> <span class="word">name</span></span>
+            <span class="line"><span class="word accent">Akhrot</span></span>
+            <span class="line"><span class="word">comes</span> <span class="word">from</span> <span class="word">the</span></span>
+            <span class="line"><span class="word">Hindi</span> <span class="word">word</span> <span class="word">for</span> <span class="word accent">Walnut.</span></span>
+          </h2>
+          <div class="body-stack">
+            <p data-reveal class="lead">A walnut looks simple from the outside.</p>
+            <p data-reveal>But inside, it mirrors the human brain — <em class="accent">layered, organic, intelligent, interconnected</em>.</p>
+            <p data-reveal>That is the philosophy behind Akhrot.</p>
+            <p data-reveal class="quiet">Not cold machines.<br/>Not robotic systems.</p>
+            <p data-reveal class="emphasis">But intelligence that feels <em>alive, emotional, contextual,</em> and deeply <em>human</em>.</p>
+          </div>
+        </div>
+
+        <div class="col-visual" aria-hidden="true">
+          <svg class="walnut-svg" viewBox="-100 -100 200 200" preserveAspectRatio="xMidYMid meet">
+            <defs>
+              <radialGradient id="wal-core" cx="50%" cy="45%" r="55%">
+                <stop offset="0%" stop-color="#3a2e22" stop-opacity="0.55"/>
+                <stop offset="100%" stop-color="#1a1410" stop-opacity="0"/>
+              </radialGradient>
+              <linearGradient id="wal-ring" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#9c8a76" stop-opacity="0.6"/>
+                <stop offset="100%" stop-color="#c8a368" stop-opacity="0.85"/>
+              </linearGradient>
+            </defs>
+
+            <circle cx="0" cy="0" r="78" fill="url(#wal-core)"/>
+
+            <g class="walnut-rings" stroke="url(#wal-ring)" fill="none">
+              <ellipse class="ring" cx="0" cy="0" rx="78" ry="76" stroke-width="0.6"/>
+              <ellipse class="ring" cx="0" cy="0" rx="64" ry="72" stroke-width="0.55"/>
+              <ellipse class="ring" cx="0" cy="0" rx="52" ry="66" stroke-width="0.5"/>
+              <ellipse class="ring" cx="0" cy="0" rx="40" ry="58" stroke-width="0.45"/>
+              <ellipse class="ring" cx="0" cy="0" rx="28" ry="48" stroke-width="0.4"/>
+              <ellipse class="ring" cx="0" cy="0" rx="16" ry="36" stroke-width="0.35"/>
+            </g>
+
+            <path class="walnut-seam"
+                  d="M0,-78 C-6,-50 -10,-20 0,0 C10,-20 6,-50 0,-78 Z M0,78 C-6,50 -10,20 0,0 C10,20 6,50 0,78 Z"
+                  fill="none" stroke="#c8a368" stroke-width="0.9" stroke-opacity="0.5"/>
+
+            <g class="walnut-nodes" fill="#c8a368">
+              <circle cx="-30" cy="-22" r="1.2"/>
+              <circle cx="28"  cy="-18" r="1.2"/>
+              <circle cx="-20" cy="10"  r="1.2"/>
+              <circle cx="22"  cy="12"  r="1.2"/>
+              <circle cx="-12" cy="34"  r="1.2"/>
+              <circle cx="14"  cy="-40" r="1.2"/>
+              <circle cx="-38" cy="-2"  r="1"/>
+              <circle cx="36"  cy="0"   r="1"/>
+              <circle cx="0"   cy="-58" r="1.4"/>
+              <circle cx="0"   cy="56"  r="1.4"/>
+            </g>
+
+            <g class="walnut-links" stroke="#c8a368" stroke-width="0.35" stroke-opacity="0.45" fill="none">
+              <path d="M-30,-22 Q -10,-2 14,-40"/>
+              <path d="M28,-18 Q 0,-30 -20,10"/>
+              <path d="M-20,10 Q 0,22 22,12"/>
+              <path d="M22,12 Q 8,28 -12,34"/>
+              <path d="M-38,-2 Q -20,-20 0,-58"/>
+              <path d="M36,0 Q 18,30 0,56"/>
+            </g>
+          </svg>
+
+          <div class="visual-caption" data-reveal>
+            <span class="cap-line"></span>
+            <span class="cap-text">Akhrot · n. walnut · the seed of intelligence</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ─── SCENE 03 · PHILOSOPHY QUOTE (large pause moment) ─── -->
+    <section class="scene scene-quote" data-num="02" data-name="The Idea">
+      <div class="quote-stage">
+        <p class="big-q-line line-1">Technology should</p>
+        <p class="big-q-line line-2"><em class="strike-anim">not replace</em></p>
+        <p class="big-q-line line-3">humanity.</p>
+        <p class="big-q-line line-4">It should <em class="accent grow-underline">amplify</em> it.</p>
+        <div class="quote-attribution">
+          <span class="atr-dash"></span>
+          <span>Akhrot · founding belief</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ─── SCENE 04 · WHY AKHROT EXISTS ─── -->
+    <section class="scene scene-why" data-num="03" data-name="Why">
+      <div class="scene-inner">
+        <span class="scene-eyebrow" data-reveal>Why Akhrot Exists</span>
+        <h2 class="scene-h2">
+          <span class="line"><span class="word">The</span> <span class="word">world</span> <span class="word">is</span></span>
+          <span class="line"><span class="word accent">drowning</span></span>
+          <span class="line"><span class="word">in</span> <span class="word">artificial</span> <span class="word">intelligence.</span></span>
+        </h2>
+
+        <p class="callout" data-reveal>But very little of it feels <em class="accent">intelligent</em>.</p>
+
+        <div class="contrast-grid">
+          <div class="contrast-row" data-reveal>
+            <span class="c-a">Everything is becoming <em>faster</em> —</span>
+            <span class="c-line"></span>
+            <span class="c-b">yet less <em>meaningful</em>.</span>
+          </div>
+          <div class="contrast-row" data-reveal>
+            <span class="c-a">More <em>automated</em> —</span>
+            <span class="c-line"></span>
+            <span class="c-b">yet less <em>human</em>.</span>
+          </div>
+        </div>
+
+        <div class="why-closing body-stack">
+          <p data-reveal>Akhrot was born as a <em>response</em> to this future.</p>
+          <p data-reveal>A future where creativity is not <span class="dimmed">generated mechanically,</span><br/>but cultivated <em class="accent">organically</em>.</p>
+          <p data-reveal class="emphasis">A future where humans and AI don't compete —<br/>they <strong>co-create</strong>.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ─── SCENE 05 · WHAT WE'RE BUILDING ─── -->
+    <section class="scene scene-building" data-num="04" data-name="Building">
+      <div class="scene-inner">
+        <span class="scene-eyebrow" data-reveal>What Akhrot is Building</span>
+        <h2 class="scene-h2 narrow">
+          <span class="line"><span class="word">A</span> <span class="word">next-generation</span></span>
+          <span class="line"><span class="word">ecosystem</span> <span class="word">where:</span></span>
+        </h2>
+
+        <ol class="big-list">
+          <li class="big-item" data-reveal>
+            <span class="bi-num">01</span>
+            <span class="bi-text">AI feels <em class="accent">personal</em></span>
+            <span class="bi-line"></span>
+          </li>
+          <li class="big-item" data-reveal>
+            <span class="bi-num">02</span>
+            <span class="bi-text">Creativity becomes <em class="accent">collaborative</em></span>
+            <span class="bi-line"></span>
+          </li>
+          <li class="big-item" data-reveal>
+            <span class="bi-num">03</span>
+            <span class="bi-text">Design and intelligence <em class="accent">merge seamlessly</em></span>
+            <span class="bi-line"></span>
+          </li>
+          <li class="big-item" data-reveal>
+            <span class="bi-num">04</span>
+            <span class="bi-text">Systems evolve with <em class="accent">emotion, memory, and context</em></span>
+            <span class="bi-line"></span>
+          </li>
+          <li class="big-item" data-reveal>
+            <span class="bi-num">05</span>
+            <span class="bi-text">Human imagination stays at the <em class="accent">center</em></span>
+            <span class="bi-line"></span>
+          </li>
+        </ol>
+
+        <div class="building-coda">
+          <p data-reveal class="quiet">This is not just software.</p>
+          <p data-reveal class="emphasis">It is an experimental philosophy of <em class="accent">digital consciousness</em>.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ─── SCENE 06 · PHILOSOPHY PILLARS ─── -->
+    <section class="scene scene-philosophy" data-num="05" data-name="Philosophy">
+      <div class="scene-inner">
+        <span class="scene-eyebrow" data-reveal>The Philosophy</span>
+        <h2 class="scene-h2 narrow">
+          <span class="line"><span class="word">Three</span> <span class="word">truths</span> <span class="word">we</span></span>
+          <span class="line"><span class="word">build</span> <span class="word">everything</span> <span class="word">around.</span></span>
+        </h2>
+
+        <div class="pillars">
+          <article class="pillar" data-reveal>
+            <header class="pillar-head">
+              <span class="pillar-num">P · 01</span>
+              <h3 class="pillar-title">Human <em class="accent">First</em>.</h3>
+            </header>
+            <p>Akhrot is built around one belief:</p>
+            <blockquote>The most powerful technology is the one that understands humans <em>emotionally, creatively, and contextually</em>.</blockquote>
+            <p>We don't want sterile interfaces.</p>
+            <p class="pillar-list">
+              <span>Systems that feel <em>intuitive</em>.</span>
+              <span>Systems that <em>inspire</em>.</span>
+              <span>Systems that <em>grow with you</em>.</span>
+            </p>
+          </article>
+
+          <article class="pillar" data-reveal>
+            <header class="pillar-head">
+              <span class="pillar-num">P · 02</span>
+              <h3 class="pillar-title">Organic <em class="accent">Intelligence</em>.</h3>
+            </header>
+            <p>Nature never creates in straight lines.</p>
+            <p>Neither do humans.</p>
+            <blockquote>Akhrot embraces <em>imperfection, emotion, curiosity, and chaos</em> — because that's where real creativity is born.</blockquote>
+          </article>
+
+          <article class="pillar" data-reveal>
+            <header class="pillar-head">
+              <span class="pillar-num">P · 03</span>
+              <h3 class="pillar-title">Creation Over <em class="accent">Consumption</em>.</h3>
+            </header>
+            <p>The internet trained people to <em>consume</em> endlessly.</p>
+            <p>Akhrot wants to rebuild a <em class="accent">culture of creation</em>.</p>
+            <p class="pillar-roles">
+              <span>Artists.</span>
+              <span>Designers.</span>
+              <span>Writers.</span>
+              <span>Engineers.</span>
+              <span>Thinkers.</span>
+              <span>Dreamers.</span>
+            </p>
+            <p class="pillar-flip">
+              <span class="strike">Not users.</span>
+              <strong class="accent">Creators.</strong>
+            </p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- ─── SCENE 07 · WHAT MAKES AKHROT DIFFERENT ─── -->
+    <section class="scene scene-different" data-num="06" data-name="Different">
+      <div class="scene-inner">
+        <span class="scene-eyebrow" data-reveal>What Makes Us Different</span>
+        <h2 class="scene-h2">
+          <span class="line"><span class="word">A</span> <span class="word">different</span></span>
+          <span class="line"><span class="word">question.</span></span>
+        </h2>
+
+        <div class="qa-pair">
+          <div class="qa-block muted" data-reveal>
+            <span class="qa-tag">Most AI companies ask</span>
+            <p class="qa-text">How can AI <em class="strike-anim">replace</em> humans?</p>
+          </div>
+          <div class="qa-pivot" aria-hidden="true">
+            <span class="pivot-mark"></span>
+          </div>
+          <div class="qa-block accent" data-reveal>
+            <span class="qa-tag">Akhrot asks</span>
+            <p class="qa-text">How can intelligence make humans <em class="accent grow-underline">more powerful?</em></p>
+          </div>
+        </div>
+
+        <p class="closing-line" data-reveal>That changes <em class="accent">everything</em>.</p>
+      </div>
+    </section>
+
+    <!-- ─── SCENE 08 · THE VISION ─── -->
+    <section class="scene scene-vision" data-num="07" data-name="Vision">
+      <div class="scene-inner">
+        <span class="scene-eyebrow" data-reveal>The Vision</span>
+        <h2 class="scene-h2">
+          <span class="line"><span class="word">Not</span> <span class="word">another</span></span>
+          <span class="line"><span class="word">productivity</span> <span class="word">app.</span></span>
+        </h2>
+
+        <p class="lead" data-reveal>Akhrot aims to become —</p>
+
+        <ul class="vision-list">
+          <li data-reveal><span class="v-num">/01</span> A <em class="accent">creative operating system</em></li>
+          <li data-reveal><span class="v-num">/02</span> A <em class="accent">cultural movement</em></li>
+          <li data-reveal><span class="v-num">/03</span> A <em class="accent">collaborative intelligence platform</em></li>
+          <li data-reveal><span class="v-num">/04</span> A bridge between <em class="accent">art, technology, and humanity</em></li>
+        </ul>
+
+        <p class="vision-closing emphasis" data-reveal>An ecosystem where intelligence feels less <em class="strike">artificial</em> — and more <em class="accent grow-underline">alive</em>.</p>
+      </div>
+    </section>
+
+    <!-- ─── SCENE 09 · CURRENTLY ─── -->
+    <section class="scene scene-currently" data-num="08" data-name="Now">
+      <div class="scene-inner">
+        <span class="scene-eyebrow" data-reveal>Currently</span>
+        <h2 class="scene-h2 narrow">
+          <span class="line"><span class="word">In</span> <span class="word">the</span> <span class="word">early</span></span>
+          <span class="line"><span class="word">experimental</span> <span class="word">phase.</span></span>
+        </h2>
+
+        <div class="status-panel" data-reveal>
+          <div class="status-bar">
+            <span class="status-led"></span>
+            <span class="status-label">Active modules · live</span>
+            <span class="status-count">05 / 05</span>
+          </div>
+
+          <ul class="status-list">
+            <li><span class="ix">01</span><span class="ix-bar"></span><span class="ix-name">Core intelligence systems</span><span class="ix-state">building</span></li>
+            <li><span class="ix">02</span><span class="ix-bar"></span><span class="ix-name">Creative workflows</span><span class="ix-state">building</span></li>
+            <li><span class="ix">03</span><span class="ix-bar"></span><span class="ix-name">Community-driven experiences</span><span class="ix-state">building</span></li>
+            <li><span class="ix">04</span><span class="ix-bar"></span><span class="ix-name">Human-centered AI interactions</span><span class="ix-state">building</span></li>
+            <li><span class="ix">05</span><span class="ix-bar"></span><span class="ix-name">Experimental design &amp; research frameworks</span><span class="ix-state">building</span></li>
+          </ul>
+        </div>
+
+        <p class="closing-line emphasis" data-reveal>This is <em class="accent">only the beginning</em>.</p>
+      </div>
+    </section>
+
+    <!-- ─── SCENE 10 · FOR THE CREATORS / WELCOME ─── -->
+    <section class="scene scene-welcome" data-num="09" data-name="Welcome">
+      <div class="scene-inner welcome-stack">
+        <span class="scene-eyebrow" data-reveal>For the Creators</span>
+
+        <h2 class="welcome-pre" data-reveal>Akhrot belongs to the <em class="accent">curious</em>.</h2>
+
+        <div class="welcome-list">
+          <p data-reveal>The people who <em>question systems</em>.</p>
+          <p data-reveal>The people who <em>create despite uncertainty</em>.</p>
+          <p data-reveal>The people who still believe technology <em class="accent">can have soul</em>.</p>
+        </div>
+
+        <p class="welcome-bridge" data-reveal>If that sounds like you —</p>
+
+        <h1 class="welcome-title">
+          <span class="line"><span class="word">Welcome</span></span>
+          <span class="line"><span class="word">to</span> <span class="word accent">Akhrot.</span></span>
+        </h1>
+
+        <a href="waitlist.html" class="welcome-cta" data-magnetic>
+          <span class="cta-label">Request access</span>
+          <span class="cta-arrow">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+          </span>
+        </a>
+      </div>
+    </section>
+
+  </main>
+
+  <footer id="main-footer"></footer>
+
+  <script src="script.js"></script>
+  <script src="footer-inject.js"></script>
+  <script src="animations.js"></script>
+  <script src="what.js"></script>
+</body>
+</html>

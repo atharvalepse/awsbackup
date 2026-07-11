@@ -1,0 +1,406 @@
+"""PostgresMemoryStore — pgvector-backed MemoryStore implementation.
+
+Maps each ``MemoryItem`` to a row in the ``memories`` table (see
+``migrations/003_memories.sql``). Embeddings land in the ``vector(384)``
+column, which is what makes a memory retrievable via pgvector — a row with
+``embedding = NULL`` is invisible to :class:`PgvectorSemanticRetriever`.
+
+Embedding-on-write
+------------------
+When constructed with an ``embedder``, :meth:`add_many` computes the vector
+for any item that doesn't already carry one (in
+``raw_metadata["_embedding"]``) so live ingests are immediately
+vector-retrievable. Without an embedder the store still persists the row but
+logs a loud warning and leaves ``embedding = NULL`` — useful only when the
+caller has pre-embedded (e.g. the smoke test) or intends to backfill later.
+
+Why this exists alongside ``JsonlMemoryStore``: same interface, completely
+different operational profile. JSONL is single-tenant, in-memory-after-load,
+single-process. Postgres gives us per-user isolation via RLS, quota
+tracking via the byte-counting trigger, and scales past a single VM.
+
+Per-user behaviour
+------------------
+Every public method takes an optional ``user_id``. When provided, we
+``SET LOCAL app.current_user_id`` inside the same transaction so the RLS
+policy from migration 005 restricts the query to that user's rows. When
+``user_id`` is None and ``GML_ADMIN_BYPASS=1``, we set ``app.is_admin``
+instead (admin tools that legitimately need cross-tenant access).
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
+from orchestration.memory_store.base import MemoryStore
+from orchestration.observability.logging import StructuredLogger
+from orchestration.pipeline.contracts import MemoryItem
+
+
+def _dedupe_id(user_id: str, item: MemoryItem) -> str:
+    """A stable id derived from the *semantic* content of a memory.
+
+    Two MemoryItems with the same (user_id, content, entity, attribute, value)
+    map to the same id; combined with the table's PRIMARY KEY constraint and
+    the existing ``ON CONFLICT (id) DO NOTHING`` clause, re-extracting the
+    same fact (e.g. running the same conversation through ingest twice) is a
+    no-op instead of inserting a duplicate row.
+
+    The prefix preserves the extractor's source convention: ``conv-`` for
+    LLM-extracted, ``aal-`` for SDP-AAL — so existing code that branches on
+    the id prefix keeps working.
+    """
+    prefix = "conv"
+    cur = (item.id or "").strip()
+    if cur.startswith("aal-"):
+        prefix = "aal"
+    payload = "\x1f".join((
+        user_id or "",
+        (item.content or "").strip().lower(),
+        (item.entity or "").strip().lower(),
+        (item.attribute or "").strip().lower(),
+        (item.value or "").strip().lower(),
+    ))
+    digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+    return f"{prefix}-{digest}"
+
+if TYPE_CHECKING:
+    import asyncpg
+
+    from orchestration.embedder.base import Embedder
+
+
+slog = StructuredLogger("memory_store.postgres")
+
+
+def _byte_size(item: MemoryItem) -> int:
+    """Approximate the storage size of a memory for quota accounting.
+
+    Sums the byte length of all text fields. Doesn't include embedding (the
+    vector storage cost is amortized across queries, not per-user).
+    """
+    parts = [item.content or ""]
+    for k in ("entity", "attribute", "value", "summary_short", "summary_medium"):
+        v = getattr(item, k, None)
+        if v:
+            parts.append(str(v))
+    return sum(len(p.encode("utf-8")) for p in parts)
+
+
+class PostgresMemoryStore(MemoryStore):
+    """asyncpg-backed MemoryStore. All methods are async.
+
+    The connection pool is owned by the caller (see
+    :func:`orchestration.storage.get_pg_pool`). Each query acquires a
+    connection from the pool, sets the per-user session vars inside a
+    transaction, runs the query, and releases.
+    """
+
+    def __init__(
+        self, pool: "asyncpg.Pool", embedder: "Embedder | None" = None
+    ) -> None:
+        self.pool = pool
+        # When set, add_many embeds item content before insert so the
+        # vector(384) column is populated and the row is retrievable.
+        self.embedder = embedder
+
+    # ----------------------------------------------------------------------
+    # Internal: per-request session-var wiring for RLS
+    # ----------------------------------------------------------------------
+
+    async def _set_session_vars(
+        self, conn: "asyncpg.Connection", user_id: str | None
+    ) -> None:
+        """Set ``app.current_user_id`` (or ``app.is_admin``) on the current
+        transaction so RLS policies scope queries correctly."""
+        if user_id is None:
+            # Treat None as admin — used for migration scripts, admin tools.
+            await conn.execute("SELECT set_config('app.is_admin', 'true', true)")
+        else:
+            await conn.execute(
+                "SELECT set_config('app.current_user_id', $1, true)", user_id
+            )
+
+    # ----------------------------------------------------------------------
+    # Internal: embedding-on-write
+    # ----------------------------------------------------------------------
+
+    async def _embeddings_for(
+        self, items: list[MemoryItem]
+    ) -> list[list[float] | None]:
+        """Return a vector (or None) for each item, aligned by position.
+
+        A caller-supplied ``raw_metadata["_embedding"]`` wins. For the rest we
+        batch-embed ``item.content`` in a single ``embed_batch`` call. If no
+        embedder is wired in, those entries stay None (row persists with a
+        NULL embedding) and we warn loudly — that row won't match any query
+        until it's backfilled.
+        """
+        out: list[list[float] | None] = [
+            (item.raw_metadata or {}).get("_embedding") for item in items
+        ]
+        missing = [i for i, vec in enumerate(out) if not vec]
+        if not missing:
+            return out
+
+        if self.embedder is None:
+            slog.warning(
+                event="pg_embed_skipped_no_embedder",
+                count=len(missing),
+                note="rows persisted with NULL embedding — not vector-retrievable "
+                     "until backfilled (pass an embedder to PostgresMemoryStore)",
+            )
+            return out
+
+        vectors = await self.embedder.embed_batch(
+            [items[i].content or "" for i in missing]
+        )
+        for i, vec in zip(missing, vectors):
+            out[i] = vec
+        return out
+
+    # ----------------------------------------------------------------------
+    # MemoryStore ABC
+    # ----------------------------------------------------------------------
+
+    async def load_all(self, user_id: str | None = None) -> list[MemoryItem]:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await self._set_session_vars(conn, user_id)
+                rows = await conn.fetch(
+                    """
+                    SELECT id, content, entity, attribute, value, source,
+                           authority_score, pinned, "timestamp",
+                           raw_metadata, summary_short,
+                           aal_simplemem, aal_sjson
+                    FROM memories
+                    ORDER BY "timestamp" ASC, created_at ASC
+                    """
+                )
+        return [self._row_to_memory_item(r) for r in rows]
+
+    async def load_with_vectors(
+        self, user_id: str | None = None
+    ) -> tuple[list[MemoryItem], dict[str, list[float]]]:
+        """Return ``(items, {id: vector})`` for the user's embedded memories.
+
+        Used to build the memory-graph projection on the Postgres backend,
+        where vectors live in the DB rather than an in-memory retriever cache.
+        Rows with a NULL embedding are skipped (they can't be projected).
+        RLS-scoped to ``user_id`` like every other read.
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await self._set_session_vars(conn, user_id)
+                rows = await conn.fetch(
+                    """
+                    SELECT id, content, entity, attribute, value, source,
+                           authority_score, pinned, "timestamp",
+                           raw_metadata, summary_short,
+                           aal_simplemem, aal_sjson, embedding
+                    FROM memories
+                    WHERE embedding IS NOT NULL
+                    ORDER BY "timestamp" ASC, created_at ASC
+                    """
+                )
+        items: list[MemoryItem] = []
+        vectors: dict[str, list[float]] = {}
+        for r in rows:
+            item = self._row_to_memory_item(r)
+            items.append(item)
+            emb = r["embedding"]
+            if emb is not None:
+                # pgvector returns a numpy array (registered codec) or list.
+                vectors[item.id] = list(emb)
+        return items, vectors
+
+    async def add(self, item: MemoryItem, user_id: str | None = None) -> None:
+        if user_id is None:
+            raise ValueError(
+                "PostgresMemoryStore.add requires user_id "
+                "(every memory must belong to a tenant)"
+            )
+        await self.add_many([item], user_id=user_id)
+
+    async def add_many(
+        self, items: list[MemoryItem], user_id: str | None = None
+    ) -> None:
+        if not items:
+            return
+        if user_id is None:
+            raise ValueError("PostgresMemoryStore.add_many requires user_id")
+
+        # Fill the vector(384) column. Prefer a caller-supplied embedding
+        # (raw_metadata["_embedding"]); otherwise embed item.content here so
+        # the row is immediately retrievable. Anything still missing after
+        # this lands as NULL (see _embeddings_for for the no-embedder warning).
+        embeddings = await self._embeddings_for(items)
+
+        rows: list[tuple] = []
+        for item, embedding in zip(items, embeddings):
+            # Don't persist the vector a second time inside raw_metadata —
+            # it already lives in the embedding column. A 384-float JSON array
+            # per row is pure bloat.
+            meta = {k: v for k, v in (item.raw_metadata or {}).items()
+                    if k != "_embedding"}
+            # Replace the extractor's random UUID with a hash of the semantic
+            # tuple — same content twice = same id = ON CONFLICT DO NOTHING
+            # silently drops the duplicate instead of writing it again.
+            dedup_id = _dedupe_id(user_id, item)
+            rows.append((
+                dedup_id,
+                user_id,
+                item.content,
+                item.entity,
+                item.attribute,
+                item.value,
+                item.source,
+                float(item.authority_score),
+                bool(item.pinned),
+                item.timestamp if item.timestamp.tzinfo
+                    else item.timestamp.replace(tzinfo=timezone.utc),
+                json.dumps(meta),
+                item.summary_short,
+                embedding,
+                _byte_size(item),
+                # AAL canonical columns (migration 008). Fall back to
+                # content/raw_metadata if the writer didn't set them so
+                # legacy paths still get something in the columns.
+                item.aal_simplemem or item.content,
+                json.dumps(
+                    item.aal_sjson
+                    or (item.raw_metadata or {}).get("sjson")
+                    or {}
+                ),
+            ))
+
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await self._set_session_vars(conn, user_id)
+                # executemany doesn't return per-row counts; that's fine
+                # since add_many doesn't need to report which inserted.
+                # Auto-provision the tenant so a new user's first write doesn't
+                # FK-fail (memories.user_id references users). No-op if it exists.
+                await conn.execute(
+                    "INSERT INTO users (user_id, plan, quota_bytes) "
+                    "VALUES ($1, 'free', 1073741824) ON CONFLICT (user_id) DO NOTHING",
+                    user_id,
+                )
+                await conn.executemany(
+                    """
+                    INSERT INTO memories (
+                        id, user_id, content, entity, attribute, value,
+                        source, authority_score, pinned, "timestamp",
+                        raw_metadata, summary_short, embedding, byte_size,
+                        aal_simplemem, aal_sjson
+                    ) VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                        $11::jsonb, $12, $13, $14, $15, $16::jsonb
+                    )
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    rows,
+                )
+        slog.info(event="pg_memory_added", count=len(items), user_id=user_id)
+
+    async def delete(self, memory_id: str, user_id: str | None = None) -> bool:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await self._set_session_vars(conn, user_id)
+                result = await conn.execute(
+                    "DELETE FROM memories WHERE id = $1", memory_id
+                )
+        # asyncpg returns a string like "DELETE 1" or "DELETE 0"
+        deleted = result.endswith(" 1")
+        if deleted:
+            slog.info(
+                event="pg_memory_deleted", memory_id=memory_id, user_id=user_id
+            )
+        return deleted
+
+    # ----------------------------------------------------------------------
+    # Quota helpers (exposed for the /api/me/quota endpoint, Phase 6)
+    # ----------------------------------------------------------------------
+
+    async def get_quota_status(self, user_id: str) -> dict:
+        """Return a dict matching ``user_quota_status`` view's columns."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await self._set_session_vars(conn, user_id)
+                row = await conn.fetchrow(
+                    "SELECT * FROM user_quota_status WHERE user_id = $1",
+                    user_id,
+                )
+        if row is None:
+            return {
+                "user_id": user_id,
+                "quota_bytes": 0,
+                "bytes_used": 0,
+                "pct_used": 0.0,
+                "memory_count": 0,
+                "warned_at_90pct": False,
+                "plan": "unknown",
+            }
+        return dict(row)
+
+    async def check_quota_or_raise(
+        self, user_id: str, new_bytes: int, hard_cap_factor: float = 1.1
+    ) -> tuple[bool, dict]:
+        """Soft-cap quota check used before inserts.
+
+        Returns ``(ok, status_dict)``:
+          * ``ok=True`` and ``warned=True`` in the dict if we crossed 90%.
+            Caller should still proceed but log + set the warned flag.
+          * ``ok=False`` if used + new > quota * hard_cap_factor.
+            Caller should reject the write (HTTP 402).
+        """
+        status = await self.get_quota_status(user_id)
+        used = int(status.get("bytes_used") or 0)
+        quota = int(status.get("quota_bytes") or 0)
+        if quota <= 0:
+            # Unbounded user (admins). Always allow.
+            return True, {**status, "warning": False}
+        projected = used + new_bytes
+        if projected > quota * hard_cap_factor:
+            return False, {**status, "blocked": True, "projected": projected}
+        warned = projected > quota * 0.9
+        return True, {**status, "warning": warned, "projected": projected}
+
+    # ----------------------------------------------------------------------
+    # Row → MemoryItem
+    # ----------------------------------------------------------------------
+
+    @staticmethod
+    def _row_to_memory_item(row) -> MemoryItem:
+        raw_metadata = row["raw_metadata"]
+        if isinstance(raw_metadata, str):
+            try:
+                raw_metadata = json.loads(raw_metadata)
+            except (ValueError, json.JSONDecodeError):
+                raw_metadata = {}
+        aal_sjson = row.get("aal_sjson") if hasattr(row, "get") else None
+        # asyncpg can hand JSONB back as either dict or string depending on
+        # the codec set up. Normalize.
+        if isinstance(aal_sjson, str):
+            try:
+                aal_sjson = json.loads(aal_sjson)
+            except (ValueError, json.JSONDecodeError):
+                aal_sjson = None
+        return MemoryItem(
+            id=row["id"],
+            content=row["content"],
+            entity=row["entity"],
+            attribute=row["attribute"],
+            value=row["value"],
+            source=row["source"],
+            authority_score=float(row["authority_score"]),
+            pinned=bool(row["pinned"]),
+            timestamp=row["timestamp"],
+            raw_metadata=raw_metadata or {},
+            summary_short=row["summary_short"],
+            aal_simplemem=row.get("aal_simplemem") if hasattr(row, "get") else None,
+            aal_sjson=aal_sjson if isinstance(aal_sjson, dict) else None,
+        )

@@ -1,0 +1,437 @@
+/**
+ * Typed client for the GML `/api` surface. One thin fetch wrapper; no data
+ * fetching in components — hooks (hooks/) call these, TanStack Query caches.
+ */
+import type {
+  ApiConversation,
+  ConversationListResponse,
+  ClusterListResponse,
+  GraphResponse,
+  HealthResponse,
+  IngestResponse,
+  MemoryDetailResponse,
+  MemoryListResponse,
+  RecallResponse,
+  RecallStreamDone,
+  StageEvent,
+  SynthesizeResponse,
+  TraceResponse,
+} from "./types";
+import { clearToken, getToken } from "./auth";
+
+/**
+ * Install bundle the dashboard renders as buttons. Deliberately does NOT
+ * carry the raw API key as a readable field — the key is base64-embedded in
+ * the deeplinks and is what the download URLs serve when fetched. The UI
+ * shows buttons, never the JSON.
+ */
+export interface McpConfigResponse {
+  client: string;
+  server_url: string;
+  cursor_deeplink: string;
+  vscode_deeplink: string;
+  install_url_claude_desktop: string;
+  install_url_windsurf: string;
+  install_url_generic: string;
+  /** Per-user .zip containing Nuts.dmg + akhort-config.json. macOS only. */
+  install_url_nuts: string;
+  /** Per-user .zip containing Nuts.exe + akhort-config.json. Windows only. */
+  install_url_nuts_windows: string;
+  /** OpenAI Codex — one-click installers (.command / .cmd) + /plugins bundle.
+   *  Each bakes a per-user token, like the rest of this surface. */
+  install_url_codex_windows: string;
+  install_url_codex_macos: string;
+  install_url_codex_plugin: string;
+  /** Legacy - kept so older clients don't break. The dashboard no longer renders it. */
+  extension_download_url: string;
+}
+
+/** Returned by /api/me/extension-bind. Used only to push the key into the
+ *  installed extension via chrome.runtime.sendMessage — never displayed. */
+export interface ExtensionBindResponse {
+  user_id: string;
+  token: string;
+}
+
+export const API_BASE =
+  process.env.NEXT_PUBLIC_GML_API_BASE ?? "http://localhost:8000";
+
+/** Auth + content-type headers. Adds Bearer <jwt> when a token is stored. */
+function authHeaders(extra?: HeadersInit): HeadersInit {
+  const token = getToken();
+  return {
+    "content-type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...extra,
+  };
+}
+
+/** Auth token envelope returned by /auth/login and /auth/signup. */
+export interface AuthToken {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+  user_id: string;
+}
+
+export interface MeResponse {
+  user_id: string;
+  email: string | null;
+  is_master: boolean;
+  // 'admin' unlocks the sidebar admin icon + invite-code page. Dashboard
+  // sign-in issues JWTs with is_master=false even for the admin account,
+  // so plan is what marks an admin.
+  plan: string | null;
+}
+
+/** A redacted key as returned by GET /api/me/keys (no secret). */
+export interface MyKey {
+  user_id: string;
+  created_at: string;
+  label: string | null;
+  key_preview: string;
+}
+
+export interface MyKeysResponse {
+  count: number;
+  keys: MyKey[];
+}
+
+/** The full secret, returned ONCE by POST /api/me/keys. */
+export interface NewKey {
+  key: string;
+  user_id: string;
+  created_at: string;
+  label: string | null;
+  note: string;
+}
+
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers: authHeaders(init?.headers),
+  });
+  if (res.status === 401) clearToken(); // token expired/invalid — AuthGate will redirect
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body.detail) detail = body.detail;
+    } catch {
+      /* non-JSON error body — keep statusText */
+    }
+    throw new ApiError(res.status, detail);
+  }
+  return (await res.json()) as T;
+}
+
+type SSEFrame = { event: string; data: unknown };
+
+function parseFrame(frame: string): SSEFrame | null {
+  let event = "message";
+  const data: string[] = [];
+  for (const line of frame.split("\n")) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) data.push(line.slice(5).trim());
+  }
+  if (data.length === 0) return null;
+  try {
+    return { event, data: JSON.parse(data.join("\n")) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * POST a JSON body and read a Server-Sent Events stream. `onStage` fires for
+ * every `stage` frame; resolves with the `done` frame's data. Throws on an
+ * `error` frame or a stream that ends without `done`.
+ */
+async function postSSE<T>(
+  path: string,
+  body: unknown,
+  onStage: (s: StageEvent) => void,
+  signal?: AbortSignal,
+): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (res.status === 401) clearToken();
+  if (!res.ok || !res.body) throw new ApiError(res.status, res.statusText);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let done: T | null = null;
+
+  for (;;) {
+    const { done: finished, value } = await reader.read();
+    if (finished) break;
+    buf += decoder.decode(value, { stream: true });
+    const frames = buf.split("\n\n");
+    buf = frames.pop() ?? "";
+    for (const raw of frames) {
+      const f = parseFrame(raw);
+      if (!f) continue;
+      if (f.event === "stage") onStage(f.data as StageEvent);
+      else if (f.event === "done") done = f.data as T;
+      else if (f.event === "error")
+        throw new ApiError(500, (f.data as { detail?: string })?.detail ?? "stream error");
+    }
+  }
+  if (done === null) throw new ApiError(500, "stream ended without a result");
+  return done;
+}
+
+
+export interface InviteCodeRecord {
+  code: string;
+  created_by: string;
+  created_at: string;
+  used_by_email: string | null;
+  used_at: string | null;
+  expires_at: string | null;
+}
+
+/** Headline counters for the admin dashboard (GET /api/admin/stats). */
+export interface AdminOverview {
+  total_users: number;
+  active_accounts: number;
+  admins: number;
+  new_7d: number;
+  online_now: number;
+  dau: number;
+  wau: number;
+  mau: number;
+  events_24h: number;
+}
+
+/** One row in the dashboard's per-user table. `total_seconds`/`seconds_24h`
+ *  are sessionized time-spent (gap > 30 min = a new session). */
+export interface AdminUserRow {
+  user_id: string;
+  email: string | null;
+  plan: string | null;
+  created_at: string | null;
+  is_active: boolean;
+  session_count: number;
+  total_seconds: number;
+  seconds_24h: number;
+  event_count: number;
+  last_seen: string | null;
+}
+
+/** One touch in the live activity feed. */
+export interface AdminActivityEvent {
+  user_id: string;
+  email: string | null;
+  method: string | null;
+  path: string | null;
+  ts: string;
+}
+
+/** One hourly bucket for the 24h sparkline. */
+export interface AdminTimeBucket {
+  bucket: string;
+  events: number;
+  users: number;
+}
+
+export interface AdminStats {
+  overview: AdminOverview;
+  users: AdminUserRow[];
+  recent: AdminActivityEvent[];
+  timeseries: AdminTimeBucket[];
+}
+
+export const api = {
+  health: () => request<HealthResponse>("/api/health"),
+
+  auth: {
+    signup: (email: string, password: string, inviteCode = "") =>
+      request<AuthToken>("/auth/signup", {
+        method: "POST",
+        body: JSON.stringify({ email, password, invite_code: inviteCode }),
+      }),
+    login: (email: string, password: string) =>
+      request<AuthToken>("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ email, password }),
+      }),
+    /**
+     * Exchange a Google ID token (the `credential` from Google Identity
+     * Services) for our own JWT. `inviteCode` is only consulted server-side
+     * when the Google email has no account yet — new accounts stay invite-
+     * gated, so login-mode callers pass nothing and existing users sail
+     * through while unknown emails get a 403 prompting them to sign up.
+     */
+    google: (credential: string, inviteCode?: string) =>
+      request<AuthToken>("/auth/google", {
+        method: "POST",
+        body: JSON.stringify({ credential, invite_code: inviteCode ?? "" }),
+      }),
+    me: () => request<MeResponse>("/auth/me"),
+  },
+
+  /** Self-service per-user keys (the gml_ bearer keys the desktop ext uses). */
+  keys: {
+    list: () => request<MyKeysResponse>("/api/me/keys"),
+    create: (label?: string) =>
+      request<NewKey>("/api/me/keys", {
+        method: "POST",
+        body: JSON.stringify({ label: label?.trim() || null }),
+      }),
+    revoke: (key: string) =>
+      request<{ revoked: boolean }>(
+        `/api/me/keys?key=${encodeURIComponent(key)}`,
+        { method: "DELETE" },
+      ),
+  },
+
+  memories: (params: { cluster?: number; limit?: number; offset?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (params.cluster != null) q.set("cluster", String(params.cluster));
+    if (params.limit != null) q.set("limit", String(params.limit));
+    if (params.offset != null) q.set("offset", String(params.offset));
+    const qs = q.toString();
+    return request<MemoryListResponse>(`/api/memories${qs ? `?${qs}` : ""}`);
+  },
+
+  memory: (id: string) =>
+    request<MemoryDetailResponse>(`/api/memories/${encodeURIComponent(id)}`),
+
+  conversations: (params: { limit?: number; offset?: number; q?: string } = {}) => {
+    const p = new URLSearchParams();
+    if (params.limit != null) p.set("limit", String(params.limit));
+    if (params.offset != null) p.set("offset", String(params.offset));
+    if (params.q) p.set("q", params.q);
+    const qs = p.toString();
+    return request<ConversationListResponse>(
+      `/api/memory/conversations${qs ? `?${qs}` : ""}`,
+    );
+  },
+
+  conversation: (id: string) =>
+    request<ApiConversation>(`/api/memory/conversations/${encodeURIComponent(id)}`),
+
+  deleteConversation: (id: string) =>
+    request<{ deleted: boolean; id: string }>(
+      `/api/memory/conversations/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
+
+  graph: (depth = 2) => request<GraphResponse>(`/api/memories/graph?depth=${depth}`),
+
+  clusters: () => request<ClusterListResponse>("/api/clusters"),
+
+  recall: (query: string, topK = 8) =>
+    request<RecallResponse>("/api/memory/recall", {
+      method: "POST",
+      body: JSON.stringify({ query, top_k: topK }),
+    }),
+
+  trace: (text: string) =>
+    request<TraceResponse>("/api/memory/trace", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
+
+  synthesize: (query: string) =>
+    request<SynthesizeResponse>(
+      `/api/memory/synthesize?query=${encodeURIComponent(query)}`,
+    ),
+
+  ingest: (userQuery: string, assistantReply: string, fast = false) =>
+    request<IngestResponse>(`/api/memory/${fast ? "sdp_ingest" : "ingest"}`, {
+      method: "POST",
+      body: JSON.stringify({ user_query: userQuery, assistant_reply: assistantReply }),
+    }),
+
+  /** Issue this user's personalized MCP install bundle (per-IDE buttons +
+   *  download URLs). The bundle never carries the raw token as a readable
+   *  field — it's only embedded inside opaque deeplinks/files. */
+  mcpConfig: (client = "generic") =>
+    request<McpConfigResponse>(
+      `/api/me/mcp-config?client=${encodeURIComponent(client)}`,
+      { method: "POST" },
+    ),
+
+  /** Mint a key for the Chrome extension. The dashboard immediately pushes
+   *  this to the installed extension via chrome.runtime.sendMessage and
+   *  forgets it — the key is never rendered into the DOM. */
+  extensionBind: () =>
+    request<ExtensionBindResponse>(`/api/me/extension-bind`, { method: "POST" }),
+
+  /** Fetch a downloadable install file (Claude / Windsurf / generic / the
+   *  extension zip). Returns a Blob so the caller can trigger a save dialog
+   *  without leaking the URL or its contents to a new tab. */
+  downloadInstall: async (url: string): Promise<Blob> => {
+    const res = await fetch(url, { headers: authHeaders() });
+    if (!res.ok) throw new Error(`Download failed (${res.status})`);
+    return res.blob();
+  },
+
+  forget: (id: string) =>
+    request<{ deleted: string; remaining: number }>(
+      `/api/memories/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
+
+  /** Full-pipeline recall with live stage progress (SSE). */
+  recallStream: (
+    query: string,
+    topK: number,
+    onStage: (s: StageEvent) => void,
+    signal?: AbortSignal,
+  ) =>
+    postSSE<RecallStreamDone>(
+      "/api/memory/recall/stream",
+      { query, top_k: topK },
+      onStage,
+      signal,
+    ),
+
+  /** Streamed pipeline trace (SSE) — same payload as `trace`, stage-by-stage. */
+  traceStream: (text: string, onStage: (s: StageEvent) => void, signal?: AbortSignal) =>
+    postSSE<TraceResponse>("/api/memory/trace/stream", { text }, onStage, signal),
+  admin: {
+    async generateInviteCode(): Promise<{ code: string }> {
+      const res = await fetch(`${API_BASE}/api/admin/invite-codes`, {
+        method: "POST",
+        headers: authHeaders(),
+      });
+      if (!res.ok) throw new ApiError(res.status, await res.text());
+      return res.json();
+    },
+    async listInviteCodes(): Promise<{ codes: InviteCodeRecord[]; total: number }> {
+      const res = await fetch(`${API_BASE}/api/admin/invite-codes`, {
+        headers: authHeaders(),
+      });
+      if (!res.ok) throw new ApiError(res.status, await res.text());
+      return res.json();
+    },
+    /** Live dashboard payload — presence, DAU/WAU/MAU, per-user time-spent,
+     *  recent activity, 24h timeseries. Polled by the admin page. */
+    stats: () => request<AdminStats>("/api/admin/stats"),
+  },
+
+};
+
+/** Self-service key helpers — thin named wrappers over `api.keys`. */
+export const listMyKeys = () => api.keys.list();
+export const createMyKey = (label?: string) => api.keys.create(label);
+export const revokeMyKey = (key: string) => api.keys.revoke(key);
+

@@ -1,0 +1,161 @@
+"use client";
+
+import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { api, ApiError } from "@/lib/api";
+
+interface InviteCode {
+  code: string;
+  created_by: string;
+  created_at: string;
+  used_by_email: string | null;
+  used_at: string | null;
+}
+
+export default function AdminPage() {
+  const router = useRouter();
+  const [codes, setCodes] = useState<InviteCode[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [newCode, setNewCode] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  async function fetchCodes() {
+    try {
+      const res = await api.admin.listInviteCodes();
+      setCodes(res.codes);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 403) {
+        router.replace("/app");
+      } else {
+        setError(err instanceof ApiError ? err.message : "Failed to load codes");
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { fetchCodes(); }, []);
+
+  async function generateCode() {
+    setGenerating(true);
+    setNewCode(null);
+    try {
+      const res = await api.admin.generateInviteCode();
+      setNewCode(res.code);
+      await fetchCodes();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to generate code");
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  function copyCode(code: string) {
+    navigator.clipboard.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }
+
+  const unused = codes.filter((c) => !c.used_by_email);
+  const used   = codes.filter((c) =>  c.used_by_email);
+
+  return (
+    <div className="min-h-screen bg-bg-0 text-text-0 p-6 max-w-3xl mx-auto">
+      <div className="mb-8">
+        <h1 className="font-clash text-2xl font-semibold tracking-tight mb-1">Admin<span className="text-accent">.</span></h1>
+        <p className="text-sm text-text-2">
+          Generate invite codes to grant new users access to Akhrots.
+          Each code can only be used once.
+        </p>
+      </div>
+
+      {error && (
+        <div className="mb-4 rounded-md border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
+          {error}
+        </div>
+      )}
+
+      {/* Generate */}
+      <div className="mb-8 rounded-xl border border-border-strong bg-bg-1 p-5">
+        <h2 className="mb-3 text-sm font-medium text-text-1">Generate new code</h2>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={generateCode}
+            disabled={generating}
+            className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-black transition-opacity hover:opacity-80 disabled:opacity-40"
+          >
+            {generating ? "Generating…" : "+ New invite code"}
+          </button>
+          {newCode && (
+            <button
+              onClick={() => copyCode(newCode)}
+              className="flex items-center gap-2 rounded-md border border-accent/40 bg-accent/10 px-4 py-2 font-mono text-sm text-accent transition-colors hover:bg-accent/20"
+            >
+              <span className="tracking-wider">{newCode}</span>
+              <span className="text-xs">{copied ? "✓ copied" : "copy"}</span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Unused codes */}
+      <div className="mb-6">
+        <h2 className="mb-2 text-sm font-medium text-text-2 uppercase tracking-wide">
+          Unused ({unused.length})
+        </h2>
+        {loading ? (
+          <p className="text-sm text-text-2">Loading…</p>
+        ) : unused.length === 0 ? (
+          <p className="text-sm text-text-2 italic">No unused codes. Generate one above.</p>
+        ) : (
+          <div className="space-y-2">
+            {unused.map((code) => (
+              <div
+                key={code.code}
+                className="flex items-center justify-between rounded-lg border border-border-strong bg-bg-1 px-4 py-3"
+              >
+                <span className="font-mono text-sm tracking-wider text-accent">
+                  {code.code}
+                </span>
+                <div className="flex items-center gap-3 text-xs text-text-2">
+                  <span>{new Date(code.created_at).toLocaleDateString()}</span>
+                  <button
+                    onClick={() => copyCode(code.code)}
+                    className="rounded px-2 py-1 border border-border-strong hover:border-accent/40 transition-colors"
+                  >
+                    copy
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Used codes */}
+      {used.length > 0 && (
+        <div>
+          <h2 className="mb-2 text-sm font-medium text-text-2 uppercase tracking-wide">
+            Used ({used.length})
+          </h2>
+          <div className="space-y-2">
+            {used.map((code) => (
+              <div
+                key={code.code}
+                className="flex items-center justify-between rounded-lg border border-border-strong/40 bg-bg-1/50 px-4 py-3 opacity-60"
+              >
+                <span className="font-mono text-sm tracking-wider line-through text-text-2">
+                  {code.code}
+                </span>
+                <span className="text-xs text-text-2">{code.used_by_email}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>About — Akhrot</title>
+  <meta name="description" content="The Akhrot story, told as a Pac-Man playground. Scroll to journey through the bento maze, collect milestones, meet the ghosts." />
+  <link rel="preconnect" href="https://api.fontshare.com" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://api.fontshare.com/v2/css?f[]=satoshi@300,400,500,700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css?v=8" />
+  <link rel="stylesheet" href="about-world.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js" defer></script>
+</head>
+<body class="about-body intro-active">
+
+  <!-- Cursor -->
+  <div id="cursor-dot" aria-hidden="true"></div>
+  <div id="cursor-ring" aria-hidden="true"></div>
+
+  <!-- Navbar (hidden during intro) -->
+  <nav id="navbar">
+    <div class="nav-pill nav-main">
+      <a href="index.html" class="nav-logo" aria-label="Akhrot Home">
+        <img src="LOGO.svg" alt="Akhrot" class="logo-img" />
+      </a>
+      <ul class="nav-links">
+        <li><a href="what.html" data-magnetic>What is Akhrot</a></li>
+        <li><a href="about.html" class="active" data-magnetic>About</a></li>
+        <li><a href="community.html" data-magnetic>Community</a></li>
+      </ul>
+    </div>
+    <div class="nav-pill nav-cta">
+      <a href="waitlist.html" class="cta-link" data-magnetic>REQUEST ACCESS</a>
+    </div>
+  </nav>
+
+  <!-- ═══ TERMINAL INTRO ═══ -->
+  <div id="terminal-intro">
+    <div class="terminal-scanlines" aria-hidden="true"></div>
+    <div class="terminal-grid-bg" aria-hidden="true"></div>
+
+    <div class="terminal-frame">
+      <div class="terminal-boot-row">
+        <span class="boot-dot"></span>
+        <span class="boot-label">SYSTEM BOOT — AKHROT/ABOUT v2.0.4</span>
+      </div>
+
+      <div class="terminal-window">
+        <div class="terminal-header">
+          <span class="terminal-dot red"></span>
+          <span class="terminal-dot yellow"></span>
+          <span class="terminal-dot green"></span>
+          <span class="terminal-title">akhrot@about — /usr/bin/launch</span>
+        </div>
+        <div class="terminal-body">
+          <div id="intro-lines"></div>
+          <div class="start-row" id="start-row">
+            <button id="start-btn" type="button">▶ PRESS START</button>
+            <span class="start-hint">press [ENTER] or [SPACE]</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="terminal-footer-row">
+        <span>NETWORK · STABLE</span>
+        <span>GPU · READY</span>
+        <span>ENTROPY · 0x7F2A</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ HUD ═══ -->
+  <div id="playground-hud" aria-hidden="true">
+    <div class="hud-segment">
+      <span class="hud-label">Score</span>
+      <span class="hud-value" id="hud-score">0</span>
+    </div>
+    <div class="hud-divider"></div>
+    <div class="hud-segment">
+      <span class="hud-label">Pellets</span>
+      <span class="hud-value" id="hud-collected">0 / 0</span>
+    </div>
+    <div class="hud-divider"></div>
+    <div class="hud-segment">
+      <span class="hud-label">Chapter</span>
+      <span class="hud-value" id="hud-chapter">Origin</span>
+    </div>
+  </div>
+
+  <!-- ═══ HINT ═══ -->
+  <div id="playground-hint" aria-hidden="true">
+    <div class="hint-keys">
+      <span class="hint-key">↑</span>
+      <span class="hint-key">↓</span>
+      <span class="hint-key">⇧</span>
+    </div>
+    <span class="hint-text">Scroll to journey · Arrow keys also work</span>
+  </div>
+
+  <!-- ═══ MINIMAP ═══ -->
+  <div id="playground-minimap" aria-hidden="true">
+    <canvas id="minimap-canvas" width="140" height="100"></canvas>
+    <span class="minimap-label">Map</span>
+  </div>
+
+  <!-- ═══ MILESTONE TOAST ═══ -->
+  <div id="milestone-toast" aria-live="polite">
+    <span class="toast-icon">✦</span>
+    <div class="toast-content">
+      <span class="toast-label">Milestone unlocked</span>
+      <span class="toast-title" id="toast-title">Origin</span>
+    </div>
+  </div>
+
+  <!-- ═══ CANVAS OVERLAY (pellets / ghosts / pacman) ═══ -->
+  <canvas id="pac-canvas" aria-hidden="true"></canvas>
+
+  <!-- ═══ PLAYGROUND VIEWPORT (fixed) ═══ -->
+  <div id="playground-viewport">
+    <div id="playground-world">
+      <div id="playground-grid"></div>
+
+      <!-- HERO -->
+      <article class="bento-wall hero-card" data-bento="hero" style="--x:1;--y:1;--w:5;--h:3;">
+        <span class="card-num">01</span>
+        <span class="card-eyebrow">A Studio for Intelligent Storytelling</span>
+        <h1 class="card-heading">Two worlds.<br/><em>One bridge.</em></h1>
+        <p class="card-body">
+          Akhrot is built by a generation that grew up between two worlds —
+          <strong>art, chaos, ideas</strong> on one side, and
+          <strong class="accent">code, systems, intelligence</strong> on the other.
+        </p>
+        <p class="card-body quiet">We never wanted to choose.</p>
+      </article>
+
+      <!-- IDENTITY -->
+      <article class="bento-wall" data-bento="identity" style="--x:7;--y:1;--w:4;--h:2;">
+        <span class="card-num">02</span>
+        <span class="card-eyebrow">Identity</span>
+        <h2 class="card-heading-sm">Not a typical<br/>tech team.</h2>
+        <p class="card-body">Designers who think like philosophers. Engineers who care about emotion. Storytellers who understand systems.</p>
+        <div class="card-tags">
+          <span class="tag">Design</span><span class="tag">Engineering</span>
+          <span class="tag">Storytelling</span><span class="tag">AI Research</span>
+        </div>
+      </article>
+
+      <!-- BELIEFS -->
+      <article class="bento-wall" data-bento="beliefs" style="--x:7;--y:4;--w:4;--h:3;">
+        <span class="card-num">03</span>
+        <span class="card-eyebrow">Core Beliefs</span>
+        <h2 class="card-heading-sm">We build<br/>where —</h2>
+        <div class="belief-list">
+          <div class="belief-row"><span class="belief-k">Curiosity</span><span class="belief-v">matters more than credentials.</span></div>
+          <div class="belief-row"><span class="belief-k">Creativity</span><span class="belief-v">is deeply respected.</span></div>
+          <div class="belief-row"><span class="belief-k">Experiments</span><span class="belief-v">are always encouraged.</span></div>
+          <div class="belief-row"><span class="belief-k">Difference</span><span class="belief-v">is a superpower.</span></div>
+        </div>
+      </article>
+
+      <!-- GENESIS -->
+      <article class="bento-wall" data-bento="genesis" style="--x:1;--y:5;--w:3;--h:3;">
+        <span class="card-num">04</span>
+        <span class="card-eyebrow">Genesis</span>
+        <h2 class="card-heading-sm">Built by dreamers,<br/><em>not just engineers.</em></h2>
+        <p class="card-body">Akhrot started with conversations, notebooks, late-night calls — never corporate boardrooms.</p>
+      </article>
+
+      <!-- CULTURE -->
+      <article class="bento-wall" data-bento="culture" style="--x:5;--y:5;--w:2;--h:2;">
+        <span class="card-num">05</span>
+        <span class="card-eyebrow">Culture</span>
+        <h2 class="card-heading-sm">Imagination<br/>over resumes.</h2>
+        <p class="card-body card-body-sm">Great ideas come from cafés, 3AM students, and artists questioning reality.</p>
+      </article>
+
+      <!-- VISION -->
+      <article class="bento-wall" data-bento="vision" style="--x:1;--y:9;--w:6;--h:2;">
+        <span class="card-num">06</span>
+        <span class="card-eyebrow">Vision</span>
+        <h2 class="card-heading-sm">The future will not be built by people who follow templates.</h2>
+        <p class="card-body">It will be built by people crazy enough to imagine new ones — to change how humans relate to intelligence.</p>
+      </article>
+
+      <!-- EVOLVING -->
+      <article class="bento-wall" data-bento="evolving" style="--x:8;--y:8;--w:3;--h:2;">
+        <span class="card-num">07</span>
+        <span class="card-eyebrow">Still Evolving</span>
+        <h2 class="card-heading-sm">Young.<br/>Experimental.<br/><em>Dreaming.</em></h2>
+        <p class="card-body card-body-sm">Where art meets intelligence, and ideas are given room to breathe.</p>
+      </article>
+
+      <!-- CTA -->
+      <article class="bento-wall cta-card" data-bento="cta" style="--x:8;--y:11;--w:4;--h:2;">
+        <span class="card-eyebrow">Resonate?</span>
+        <h2 class="card-heading-sm">Join the<br/>community.</h2>
+        <a href="waitlist.html" class="world-cta" data-magnetic>
+          <span>Request access</span>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </a>
+      </article>
+
+      <div class="bento-wall ornament-wall" style="--x:1;--y:4;--w:3;--h:1;">
+        <span class="ornament-text">Akhrot · est. 2025</span>
+      </div>
+      <div class="bento-wall ornament-wall" style="--x:5;--y:8;--w:3;--h:1;">
+        <span class="ornament-text">Intelligence was never artificial</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scroll spacer — gives body height so native scroll drives the journey -->
+  <div id="playground-spacer" aria-hidden="true"></div>
+
+  <script src="script.js"></script>
+  <script src="animations.js"></script>
+  <script src="about-world.js"></script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+## Retrieved Context
+
+{% if reason_from_scratch %}
+No prior memory was retrieved; reason from scratch.
+{% elif selected %}
+{% for rh in selected %}
+**[{{ loop.index }}] {{ rh.record.source }}**{% if rh.record.entity %} — {{ rh.record.entity }}{% if rh.record.attribute %}/{{ rh.record.attribute }}{% endif %}{% endif %}
+{{ rh.record.content }}
+
+{% endfor %}
+{% else %}
+No relevant context retrieved.
+{% endif %}
+{% if reasoning_content %}
+
+## Prior Reasoning (from SAM)
+
+{{ reasoning_content }}
+{% endif %}
+
+## Provenance
+{{ total_items }} item(s) retrieved from GML memory.
+
+## User Query

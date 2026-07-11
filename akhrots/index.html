@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Akhrot — Intelligence was never artificial.</title>
+  <meta name="description" content="Akhrot is a nature-inspired intelligence platform. Experience the evolution of intelligence through an immersive cinematic journey." />
+  <meta name="keywords" content="Akhrot, Artificial Intelligence, AI, Nature-inspired AI, Intelligence, Machine Learning, Cognitive Systems" />
+  <meta name="robots" content="index, follow" />
+  <link rel="canonical" href="https://akhrots.com/" />
+  
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="LOGO.png" />
+  <link rel="apple-touch-icon" href="LOGO.png" />
+
+  <!-- Open Graph / Facebook -->
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://akhrots.com/" />
+  <meta property="og:title" content="Akhrot — Intelligence was never artificial." />
+  <meta property="og:description" content="Akhrot is a nature-inspired intelligence platform. Experience the evolution of intelligence through an immersive cinematic journey." />
+  <meta property="og:image" content="https://akhrots.com/Brainut.jpeg" />
+
+  <!-- Twitter -->
+  <meta property="twitter:card" content="summary_large_image" />
+  <meta property="twitter:url" content="https://akhrots.com/" />
+  <meta property="twitter:title" content="Akhrot — Intelligence was never artificial." />
+  <meta property="twitter:description" content="Akhrot is a nature-inspired intelligence platform. Experience the evolution of intelligence through an immersive cinematic journey." />
+  <meta property="twitter:image" content="https://akhrots.com/Brainut.jpeg" />
+  <link rel="preconnect" href="https://api.fontshare.com" />
+  <link href="https://api.fontshare.com/v2/css?f[]=satoshi@300,400,500,700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css?v=8" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/velocity/1.5.2/velocity.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js" defer></script>
+  <style>
+    /* ── Phase-5 Brainut reveal-under-video (clean, no glassmorphism cursor) ── */
+    #brainut-bg {
+      position: absolute; inset: 0; z-index: 0;
+      overflow: hidden; pointer-events: none;
+      opacity: 0;
+      transition: opacity 1.2s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    body.reveal-active #brainut-bg { opacity: 1; }
+    #brainut-base-img {
+      width: 100%; height: 100%; object-fit: cover; object-position: center;
+      filter: grayscale(8%) brightness(0.82) contrast(1.05);
+      transform: scale(1.04);
+    }
+  </style>
+</head>
+
+<body class="loading">
+
+  <!-- ═══ LOADER ═══ -->
+  <div id="loader">
+    <div class="loader-content">
+      <img src="LOGO.svg" alt="Akhrot" class="loader-logo" />
+      <p class="loader-tagline">Intelligence was never artificial.</p>
+      <div class="loader-progress-bar"><span></span></div>
+    </div>
+  </div>
+
+  <!-- ═══ CURSOR (clean, minimal, professional) ═══ -->
+  <div id="cursor-dot" aria-hidden="true"></div>
+  <div id="cursor-ring" aria-hidden="true"></div>
+
+  <!-- ═══ NAVBAR ═══ -->
+  <nav id="navbar">
+    <div class="nav-pill nav-main">
+      <a href="index.html" class="nav-logo" aria-label="Akhrot Home">
+        <img src="LOGO.svg" alt="Akhrot" class="logo-img" />
+      </a>
+      <ul class="nav-links">
+        <li><a href="what.html" data-magnetic>What is Akhrot</a></li>
+        <li><a href="about.html" data-magnetic>About</a></li>
+        <li><a href="community.html" data-magnetic>Community</a></li>
+      </ul>
+    </div>
+    <div class="nav-pill nav-cta">
+      <a href="waitlist.html" class="cta-link" data-magnetic>REQUEST ACCESS</a>
+    </div>
+  </nav>
+
+  <div id="scroll-container">
+    <div id="sticky-scene">
+
+      <!-- Brainut image: z-index 0, below video, revealed when video is masked -->
+      <div id="brainut-bg">
+        <img src="Brainut.jpeg" alt="" id="brainut-base-img" />
+      </div>
+
+      <video id="main-video" muted playsinline
+        aria-label="Akhrot evolution sequence"
+        data-no-media-cursor
+        data-src-webm="akhrot-video.webm"
+        data-src-mp4="akhrot-video.mp4">
+      </video>
+
+      <div id="vignette" aria-hidden="true"></div>
+      <div id="grain" aria-hidden="true"></div>
+      <div id="reveal-layer" aria-hidden="true"></div>
+
+      <!-- ═══ STORY PHASES ═══ -->
+      <div id="cards-container">
+
+        <!-- PHASE 1 -->
+        <div class="phase-container active" id="phase-1">
+          <div class="phase-title align-left">
+            <span class="eyebrow seq">01 — The Beginning</span>
+            <h1 class="title-main seq">Every system<br>begins the<br>same way.</h1>
+          </div>
+          <div class="story-card align-right">
+            <div class="card-body">
+              <p class="seq dramatic">Quietly.</p>
+              <p class="seq">Not with complexity.<br>Not with computation.<br>But with potential.</p>
+              <p class="seq">A single bloom carries everything it needs to become something greater — structure, logic, growth, and evolution.</p>
+              <p class="seq">Akhrot was born from observing this process.</p>
+              <p class="seq dramatic">Not from machines.<br>From nature.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- PHASE 2 -->
+        <div class="phase-container" id="phase-2">
+          <div class="phase-title align-right">
+            <span class="eyebrow seq">02 — From Form to Function</span>
+            <h1 class="title-main seq">Possibility<br>becomes<br>structure.</h1>
+          </div>
+          <div class="story-card align-left">
+            <div class="card-body">
+              <p class="seq">As the flower transforms into fruit, something important happens:</p>
+              <p class="seq">What once existed only as potential now begins organizing itself — layer by layer.</p>
+              <p class="seq">Growth becomes intentional.<br>Patterns begin to form.</p>
+              <p class="seq dramatic">This is how intelligence evolves.</p>
+              <p class="seq">Not instantly. But through continuous refinement.</p>
+              <p class="seq">At Akhrot, we believe intelligent systems should work the same way: learning, adapting, and becoming more meaningful over time.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- PHASE 3 -->
+        <div class="phase-container" id="phase-3">
+          <div class="phase-title align-left">
+            <span class="eyebrow seq">03 — The Core</span>
+            <h1 class="title-main seq">Inside every<br>fruit lies<br>a seed.</h1>
+          </div>
+          <div class="story-card align-right">
+            <div class="card-body">
+              <p class="seq dramatic">Hidden. Dense. Essential.</p>
+              <p class="seq">The seed is not the outer experience.<br>It is the core that holds everything together.</p>
+              <p class="seq">For us, this represents the foundation of intelligence itself: the ability to process, connect, and understand.</p>
+              <p class="seq">Akhrot is built around this idea — creating systems that don't just respond to information, but organize it into meaningful patterns.</p>
+              <p class="seq dramatic">Because true intelligence is not about volume.<br>It's about understanding.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- PHASE 4 -->
+        <div class="phase-container" id="phase-4">
+          <div class="phase-title align-right">
+            <span class="eyebrow seq">04 — The Walnut</span>
+            <h1 class="title-main seq">Nature solved<br>intelligence<br>first.</h1>
+          </div>
+          <div class="story-card align-left">
+            <div class="card-body">
+              <p class="seq">As the system matures, the shell forms.</p>
+              <p class="seq dramatic">Protection. Structure. Stability.</p>
+              <p class="seq">Inside, the walnut reveals something unexpectedly familiar: a form that resembles the human brain itself.</p>
+              <p class="seq">Folded. Efficient. Layered with complexity.</p>
+              <p class="seq">Nature solved intelligence long before technology attempted to replicate it.</p>
+              <p class="seq">That realization became the philosophy behind Akhrot.</p>
+              <p class="seq dramatic">What we call artificial intelligence may not be artificial at all — only a new interpretation of patterns that have always existed.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- PHASE 5 — LOOK INSIDE -->
+        <div class="phase-container" id="phase-5">
+          <div class="phase-title align-left" style="z-index:2;pointer-events:none;">
+            <span class="eyebrow seq">05 — Look Inside</span>
+            <h1 class="title-main seq">Explore<br>beneath the<br>surface.</h1>
+          </div>
+          <div class="story-card align-right" style="z-index:2;pointer-events:auto;">
+            <div class="card-body">
+              <p class="seq">What appears organic begins to reveal something deeper: networks, structures, signals, systems.</p>
+              <p class="seq">The line between nature and technology starts to disappear.</p>
+              <p class="seq">This is the world Akhrot is building — where intelligence feels less mechanical, more intuitive, more human.</p>
+              <p class="seq cue">Move your cursor to reveal the network.</p>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /cards-container -->
+
+      <!-- Scroll Hint -->
+      <div id="scroll-hint">
+        <div id="scroll-line"></div>
+        <span>Scroll to explore</span>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ═══ FOOTER ═══ -->
+  <footer id="main-footer"></footer>
+
+  <script src="script.js"></script>
+  <script src="footer-inject.js"></script>
+  <script src="animations.js"></script>
+  <script>
+  /* ── Phase 5: cursor-driven mask reveal (no oversized rings, no blur) ── */
+  (function(){
+    'use strict';
+    const mainVideo = document.getElementById('main-video');
+    if (!mainVideo) return;
+
+    let tx = window.innerWidth/2, ty = window.innerHeight/2;
+    let cx = tx, cy = ty;
+    let curR = 0, tarR = 0;
+
+    function lerp(a,b,t){ return a+(b-a)*t; }
+
+    function tick() {
+      cx = lerp(cx, tx, 0.12);
+      cy = lerp(cy, ty, 0.12);
+      curR = lerp(curR, tarR, 0.1);
+
+      if (document.body.classList.contains('reveal-active')) {
+        const xPct = (cx / window.innerWidth  * 100).toFixed(2) + '%';
+        const yPct = (cy / window.innerHeight * 100).toFixed(2) + '%';
+        const rPx  = curR.toFixed(0) + 'px';
+        const m = `radial-gradient(circle ${rPx} at ${xPct} ${yPct}, transparent 0%, transparent 55%, black 78%, black 100%)`;
+        mainVideo.style.webkitMaskImage = m;
+        mainVideo.style.maskImage = m;
+      }
+      requestAnimationFrame(tick);
+    }
+    tick();
+
+    document.addEventListener('mousemove', e => {
+      tx = e.clientX; ty = e.clientY;
+      tarR = document.body.classList.contains('reveal-active') ? 280 : 0;
+    });
+
+    new MutationObserver(() => {
+      if (!document.body.classList.contains('reveal-active')) {
+        tarR = 0;
+        mainVideo.style.webkitMaskImage = '';
+        mainVideo.style.maskImage = '';
+      } else {
+        tarR = 280;
+      }
+    }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+  })();
+  </script>
+</body>
+
+</html>

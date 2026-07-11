@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Community — Akhrot</title>
+  <meta name="description" content="Join the Akhrot community. Explore ideas, connect with builders, and shape the future of nature-inspired intelligence." />
+  <link rel="preconnect" href="https://api.fontshare.com" />
+  <link href="https://api.fontshare.com/v2/css?f[]=satoshi@300,400,500,700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css?v=8" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/velocity/1.5.2/velocity.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pixi.js/7.3.2/pixi.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/snap.svg/0.5.1/snap.svg-min.js" defer></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js" defer></script>
+</head>
+<body class="has-particles">
+
+  <!-- Particle Field -->
+  <canvas id="grid-canvas" aria-hidden="true" style="opacity:0.3;"></canvas>
+  <div class="watermark-bg">COMMUNITY</div>
+
+  <div id="cursor-dot" aria-hidden="true"></div>
+  <div id="cursor-ring" aria-hidden="true"></div>
+
+  <nav id="navbar">
+    <div class="nav-pill nav-main">
+      <a href="index.html" class="nav-logo"><img src="LOGO.svg" alt="Akhrot" class="logo-img" /></a>
+      <ul class="nav-links">
+        <li><a href="what.html" data-magnetic>What is Akhrot</a></li>
+        <li><a href="about.html" data-magnetic>About</a></li>
+        <li><a href="community.html" data-magnetic>Community</a></li>
+      </ul>
+    </div>
+    <div class="nav-pill nav-cta">
+      <a href="waitlist.html" class="cta-link" data-magnetic>REQUEST ACCESS</a>
+    </div>
+  </nav>
+
+  <div class="page-wrapper">
+    <div class="page-container">
+
+      <div class="fade-in" style="text-align: center; margin-bottom: 2rem;">
+        <p class="page-eyebrow" style="text-align: center;">Community</p>
+        <h1 class="page-heading" style="text-align: center;">Connect. Build. Evolve.</h1>
+        <p style="color:var(--ink-dim);font-size:1.05rem;max-width:550px;margin:0 auto;line-height:1.7">
+          Join a community of thinkers, builders, and dreamers exploring the future of nature-inspired intelligence.
+        </p>
+      </div>
+
+      <!-- Bento Grid -->
+      <div class="bento-grid">
+        <div class="bento-card bento-hero stagger-in stagger-1 glow-card">
+          <div class="bento-tag" style="margin:0 auto;">Join the movement</div>
+          <div>
+            <h2 class="bento-title">The Akhrot Ecosystem</h2>
+            <p class="bento-desc" style="max-width:600px;margin:0 auto;">Explore ideas, concepts, experiments, and future discussions around nature-inspired intelligence.</p>
+          </div>
+        </div>
+
+        <div class="bento-card bento-feat stagger-in stagger-2 glow-card">
+          <div class="bento-tag"><div class="live-indicator"></div> Discussion</div>
+          <h3 class="bento-title">Reddit Community</h3>
+          <p class="bento-desc">Deep dives into philosophy, UI/UX, cognitive patterns, and intelligent architecture.</p>
+          <a href="#" class="bento-cta-btn" data-magnetic>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 22C6.47715 22 2 17.5228 2 12C2 6.47715 6.47715 2 12 2C17.5228 2 22 6.47715 22 12C22 17.5228 17.5228 22 12 22ZM12 20C16.4183 20 20 16.4183 20 12C20 7.58172 16.4183 4 12 4C7.58172 4 4 7.58172 4 12C4 16.4183 7.58172 20 12 20ZM12 18V15H10C7.79086 15 6 13.2091 6 11V9H8V11C8 12.1046 8.89543 13 10 13H12V10L16 14L12 18Z"></path></svg>
+            Join r/Akhrot
+          </a>
+        </div>
+
+        <div class="bento-card bento-feat-small stagger-in stagger-3 glow-card">
+          <div class="bento-tag"><div class="live-indicator"></div> The Lab</div>
+          <h3 class="bento-title">Discord Server</h3>
+          <p class="bento-desc">Connect with builders, designers, and early adopters shaping Akhrot.</p>
+          <a href="#" class="bento-cta-btn" data-magnetic>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 22C6.47715 22 2 17.5228 2 12C2 6.47715 6.47715 2 12 2C17.5228 2 22 6.47715 22 12C22 17.5228 17.5228 22 12 22ZM12 20C16.4183 20 20 16.4183 20 12C20 7.58172 16.4183 4 12 4C7.58172 4 4 7.58172 4 12C4 16.4183 7.58172 20 12 20ZM11 10H13V16H11V10ZM11 8H13V10H11V8Z"></path></svg>
+            Enter Discord
+          </a>
+        </div>
+
+        <div class="bento-card bento-sm stagger-in stagger-4 glow-card">
+          <div class="bento-tag">Architecture</div>
+          <h3 class="bento-title" style="font-size:1.4rem;">Nature as System</h3>
+          <p class="bento-desc">Exploring how natural systems influence the next generation of intelligent architecture.</p>
+        </div>
+
+        <div class="bento-card bento-sm stagger-in stagger-4 glow-card">
+          <div class="bento-tag">Philosophy</div>
+          <h3 class="bento-title" style="font-size:1.4rem;">The Core Ethos</h3>
+          <p class="bento-desc">Intelligence is not about volume — it's about understanding how systems connect, evolve, and grow.</p>
+        </div>
+
+        <div class="bento-card bento-sm stagger-in stagger-4 glow-card">
+          <div class="bento-tag">Vision</div>
+          <h3 class="bento-title" style="font-size:1.4rem;">The Roadmap</h3>
+          <p class="bento-desc">An evolving, nature-inspired ecosystem. Each phase grows from the last — like branches from a seed.</p>
+        </div>
+
+        <div class="bento-card bento-wide stagger-in stagger-5 glow-card">
+          <div class="bento-tag">Research</div>
+          <h3 class="bento-title">Current Experiments</h3>
+          <p class="bento-desc">Active research in natural architecture, adaptive systems, and intelligence patterns.</p>
+        </div>
+
+        <div class="bento-card bento-tall stagger-in stagger-5 glow-card">
+          <div class="bento-tag">Ecosystem</div>
+          <h3 class="bento-title">Future Intelligence</h3>
+          <p class="bento-desc">Building the foundation for tomorrow's intelligence — where technology grows like nature.</p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ═══ FOOTER ═══ -->
+  <footer id="main-footer"></footer>
+
+  <script src="script.js"></script>
+  <script src="footer-inject.js"></script>
+  <script src="animations.js"></script>
+</body>
+</html>

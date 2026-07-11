@@ -1,0 +1,25 @@
+[Unit]
+Description=GML MCP server (streamable-http transport)
+After=network.target
+
+[Service]
+Type=simple
+User=gml
+WorkingDirectory=/opt/gml
+Environment="PATH=/opt/gml/.venv/bin:/usr/bin:/bin"
+Environment="GML_API_KEY=REPLACE_ME_WITH_MASTER_KEY"
+Environment="GML_USER_KEYS_FILE=/opt/gml/data/users.jsonl"
+Environment="GML_MCP_TRANSPORT=streamable-http"
+Environment="GML_MCP_HOST=127.0.0.1"
+Environment="GML_MCP_PORT=8765"
+Environment="GML_MCP_PATH=/mcp"
+Environment="GML_LLM_BACKEND=transformers"
+Environment="GML_TRANSFORMERS_BASE=Qwen/Qwen2.5-3B-Instruct"
+Environment="GML_TRANSFORMERS_ADAPTER=/opt/gml/models/qwen_locomo_ft/adapter"
+Environment="GML_TRANSFORMERS_DEVICE=cuda"
+ExecStart=/opt/gml/.venv/bin/python -m orchestration.mcp_server
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
